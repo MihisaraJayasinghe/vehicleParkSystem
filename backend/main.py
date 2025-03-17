@@ -60,18 +60,37 @@ try:
     client.admin.command('ping')
     logger.info("Successfully connected to MongoDB Atlas")
     
+    # Initialize database and collections in module scope
+    db = client.parkvision_db
+    vehicles_collection = db.vehicles
+    parking_slots_collection = db.parking_slots
+    # NEW: Initialize new collection for vehicle records
+    vehicle_records = db.vehicle_records
+
+    # Initialize services
     from services.database_service import DatabaseService
     from services.booking_service import BookingService
-    
     db_service = DatabaseService(MONGO_URI)
-    booking_service = BookingService(db_service.users, db_service.parking_slots)
+    booking_service = BookingService(db_service.users, parking_slots_collection)
     
-    # Initialize 100 parking slots if they don't exist
-    if db_service.parking_slots.count_documents({}) == 0:
-        slots = [{"slot_id": str(i+1), "status": "free", "plate_number": None} 
-                for i in range(100)]
-        db_service.parking_slots.insert_many(slots)
+    # Initialize slots if empty
+    if parking_slots_collection.count_documents({}) == 0:
+        slots = [
+            {
+                "slot_id": str(i+1),
+                "status": "free",
+                "plate_number": None,
+                "booking_time": None,
+                "parking_time": None
+            } 
+            for i in range(100)
+        ]
+        parking_slots_collection.insert_many(slots)
         logger.info("Initialized 100 parking slots")
+
+    # Initialize vehicles collection if needed
+    if vehicles_collection.count_documents({}) == 0:
+        logger.info("Vehicles collection is ready")
 
 except Exception as e:
     logger.error(f"Failed to connect to MongoDB Atlas: {str(e)}")
@@ -137,8 +156,18 @@ async def predict_ocr(file: UploadFile = File(...)):
 
             if class_name == "number plate":
                 plate_region = image_bgr[y1:y2, x1:x2]
-                plate_rgb = cv2.cvtColor(plate_region, cv2.COLOR_BGR2RGB)
-                ocr_results = reader.readtext(plate_rgb)
+                # Zoom (enlarge) the detected plate region for better OCR
+                zoomed_plate = cv2.resize(plate_region, None, fx=2, fy=2, interpolation=cv2.INTER_CUBIC)
+                # Pre-processing: convert to grayscale and blur
+                gray_plate = cv2.cvtColor(zoomed_plate, cv2.COLOR_BGR2GRAY)
+                filtered_plate = cv2.bilateralFilter(gray_plate, 11, 17, 17)
+                # Fixed binary threshold: adjust value as needed
+                ret, thresh_plate = cv2.threshold(filtered_plate, 100, 255, cv2.THRESH_BINARY)
+                # Ensure white background with black text (invert if needed)
+                if cv2.mean(thresh_plate)[0] < 127:
+                    thresh_plate = cv2.bitwise_not(thresh_plate)
+                processed_plate = cv2.cvtColor(thresh_plate, cv2.COLOR_GRAY2RGB)
+                ocr_results = reader.readtext(processed_plate)
                 if ocr_results:
                     recognized_str = " ".join([res[1] for res in ocr_results])
                     recognized_plates.append(recognized_str)
@@ -174,6 +203,9 @@ async def predict_ocr(file: UploadFile = File(...)):
     except Exception as e:
         return JSONResponse({"error": str(e)}, status_code=500)
 
+# NEW: Import the new model
+from models.database_models import VehicleRecord
+
 @app.post("/add_vehicle")
 async def add_vehicle(vehicle: dict = Body(...)):
     try:
@@ -194,7 +226,18 @@ async def add_vehicle(vehicle: dict = Body(...)):
             "time_in": current_time
         }
         
+        # Insert into vehicles collection
         result = vehicles_collection.insert_one(new_record)
+        
+        # NEW: Also insert into the vehicle_records collection using the new model data
+        vehicle_record = VehicleRecord(
+            vehicle_type=vehicle_type,
+            license_plate=license_plate,
+            is_employee=is_employee,
+            time_in=current_time
+        )
+        vehicle_records.insert_one(vehicle_record.dict())
+        
         return JSONResponse({
             "message": "Vehicle added successfully",
             "id": str(result.inserted_id)

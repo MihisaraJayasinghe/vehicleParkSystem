@@ -172,7 +172,8 @@ function VehicleDetectionPage() {
       const res = await fetch("http://127.0.0.1:8000/get_parked_vehicles");
       if (!res.ok) throw new Error("Failed to fetch parked vehicles.");
       const data = await res.json();
-      setParkedVehicles(data);
+      // Set parkedVehicles from data.vehicles
+      setParkedVehicles(data.vehicles);
     } catch (error) {
       alert(error.message);
     }
@@ -337,7 +338,8 @@ function VehicleDetectionPage() {
               </thead>
               <tbody>
                 {parkedVehicles.map((veh) => (
-                  <tr key={veh._id}>
+                  // Use veh.id as the key since backend returns id
+                  <tr key={veh.id}>
                     <td>{veh.vehicle_type}</td>
                     <td>{veh.license_plate}</td>
                     <td>{veh.is_employee ? "Yes" : "No"}</td>

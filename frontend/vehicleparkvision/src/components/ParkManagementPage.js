@@ -14,7 +14,8 @@ function ParkManagement() {
     try {
       const res = await fetch('http://127.0.0.1:8000/get_parked_vehicles');
       const data = await res.json();
-      setVehicles(data);
+      // Use vehicles from data
+      setVehicles(data.vehicles);
     } catch (error) {
       console.error('Error fetching vehicles:', error);
     }
@@ -83,7 +84,7 @@ function ParkManagement() {
             {Array.isArray(vehicles) && vehicles
               .filter(v => v.license_plate?.toString().includes(searchPlate))
               .map(vehicle => (
-                <tr key={vehicle.license_plate}>
+                <tr key={vehicle.id}>
                   <td>{vehicle.license_plate}</td>
                   <td>{vehicle.vehicle_type}</td>
                   <td>

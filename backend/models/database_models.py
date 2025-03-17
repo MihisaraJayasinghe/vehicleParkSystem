@@ -45,3 +45,11 @@ class SlotAllocation(BaseModel):
     is_occupied: bool = False
     occupied_since: Optional[datetime] = None
     last_updated: datetime = datetime.utcnow()
+
+class VehicleRecord(BaseModel):
+    vehicle_type: str
+    license_plate: str
+    is_employee: bool = False
+    time_in: datetime
+    in_parking: bool = True
+    created_at: datetime = datetime.utcnow()
