@@ -1,0 +1,11 @@
+fastapi 
+uvicorn 
+python-multipart 
+ultralytics 
+pillow 
+easyocr 
+python-dotenv 
+pymongo 
+opencv-python-headless 
+numpy 
+utils

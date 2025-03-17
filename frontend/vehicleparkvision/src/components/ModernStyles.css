@@ -1,0 +1,218 @@
+.modern-container {
+    max-width: 1200px;
+    margin: 0 auto;
+    padding: 2rem;
+}
+
+.modern-title {
+    text-align: center;
+    color: #2c3e50;
+    margin-bottom: 2rem;
+    font-size: 2.5rem;
+}
+
+.modern-back-button {
+    display: inline-block;
+    padding: 0.5rem 1rem;
+    background: #34495e;
+    color: white;
+    text-decoration: none;
+    border-radius: 5px;
+    margin-bottom: 2rem;
+    transition: background 0.3s ease;
+}
+
+.modern-back-button:hover {
+    background: #2c3e50;
+    color: white;
+}
+
+.modern-card {
+    background: white;
+    border-radius: 10px;
+    box-shadow: 0 2px 15px rgba(0, 0, 0, 0.1);
+    margin-bottom: 2rem;
+    overflow: hidden;
+}
+
+.modern-card-header {
+    background: #f8f9fa;
+    padding: 1rem;
+    border-bottom: 1px solid #e9ecef;
+    font-weight: 600;
+    color: #2c3e50;
+}
+
+.modern-card-header-flex {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+}
+
+.modern-card-body {
+    padding: 1.5rem;
+}
+
+/* Media container styles */
+.modern-media-grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(300px, 1fr));
+    gap: 1rem;
+    margin: 1rem 0;
+}
+
+.modern-media-container {
+    aspect-ratio: 16/9;
+    background: #f8f9fa;
+    border-radius: 4px;
+    overflow: hidden;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    border: 1px solid #dee2e6;
+}
+
+.modern-media {
+    max-width: 100%;
+    max-height: 100%;
+    object-fit: contain;
+}
+
+.modern-video-container {
+    width: 1000px;
+    height: 1000px;
+    margin: 0 auto;
+    position: relative;
+    background: #000;
+    border-radius: 5px;
+    overflow: hidden;
+}
+
+.modern-video {
+    width: 100%;
+    height: 100%;
+    object-fit: contain;
+}
+
+/* Form elements */
+.modern-input-file {
+    width: 100%;
+    padding: 0.5rem;
+    margin-bottom: 1rem;
+    border: 2px dashed #dee2e6;
+    border-radius: 5px;
+    background: #f8f9fa;
+}
+
+.modern-input-file:disabled {
+    opacity: 0.7;
+    cursor: not-allowed;
+}
+
+.modern-button {
+    padding: 0.5rem 1.5rem;
+    border: none;
+    border-radius: 5px;
+    font-weight: 500;
+    cursor: pointer;
+    transition: all 0.3s ease;
+}
+
+.modern-button.primary {
+    background: #007bff;
+    color: white;
+}
+
+.modern-button.success {
+    background: #28a745;
+    color: white;
+}
+
+.modern-button.outline {
+    background: transparent;
+    border: 1px solid #007bff;
+    color: #007bff;
+}
+
+.modern-button:hover {
+    transform: translateY(-1px);
+    box-shadow: 0 2px 5px rgba(0, 0, 0, 0.1);
+}
+
+.modern-button:disabled {
+    opacity: 0.7;
+    cursor: not-allowed;
+    transform: none;
+}
+
+/* List styles */
+.modern-list {
+    list-style: none;
+    padding: 0;
+    margin: 0;
+}
+
+.modern-list-item {
+    padding: 0.75rem 1rem;
+    background: #f8f9fa;
+    border: 1px solid #e9ecef;
+    border-radius: 5px;
+    margin-bottom: 0.5rem;
+}
+
+/* Table styles */
+.modern-table {
+    width: 100%;
+    border-collapse: collapse;
+}
+
+.modern-table th,
+.modern-table td {
+    padding: 1rem;
+    border-bottom: 1px solid #e9ecef;
+    text-align: left;
+}
+
+.modern-table th {
+    background: #f8f9fa;
+    font-weight: 600;
+    color: #2c3e50;
+}
+
+.modern-table tr:hover {
+    background: #f8f9fa;
+}
+
+/* Alert styles */
+.modern-alert {
+    padding: 1rem;
+    border-radius: 5px;
+    margin-top: 1rem;
+    background: #d4edda;
+    color: #155724;
+    border: 1px solid #c3e6cb;
+}
+
+/* Responsive adjustments */
+@media (max-width: 1200px) {
+    .modern-media-container,
+    .modern-video-container {
+        width: 100%;
+        height: auto;
+        aspect-ratio: 1;
+    }
+}
+
+@media (max-width: 768px) {
+    .modern-container {
+        padding: 1rem;
+    }
+
+    .modern-title {
+        font-size: 2rem;
+    }
+
+    .modern-card {
+        margin-bottom: 1rem;
+    }
+}
