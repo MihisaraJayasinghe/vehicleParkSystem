@@ -1,0 +1,137 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <title>Vehicle & Plate Detection</title>
+  <link rel="stylesheet" href="https://stackpath.bootstrapcdn.com/bootstrap/4.5.2/css/bootstrap.min.css">
+  <!-- Optionally include Bootstrap JS and dependencies -->
+  <script src="https://code.jquery.com/jquery-3.5.1.slim.min.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/popper.js@1.16.1/dist/umd/popper.min.js"></script>
+  <script src="https://stackpath.bootstrapcdn.com/bootstrap/4.5.2/js/bootstrap.min.js"></script>
+  <style>
+    body { padding-top: 2rem; }
+    .result-card { margin-top: 1rem; }
+  </style>
+</head>
+<body>
+  <div class="container">
+    <h1 class="mb-4 text-center">Vehicle & Plate Detection</h1>
+    
+    <!-- Image Detection Section -->
+    <div class="card mb-4">
+      <div class="card-header">Upload Vehicle Image</div>
+      <div class="card-body">
+        <form id="uploadForm">
+          <div class="form-group">
+            <input type="file" id="fileInput" name="file" accept="image/*" class="form-control-file" required>
+          </div>
+          <button type="submit" class="btn btn-primary">Analyze</button>
+        </form>
+      </div>
+    </div>
+
+    <div class="row">
+      <div class="col-md-6 result-card">
+        <h5>Vehicle Types</h5>
+        <ul id="vehicleList" class="list-group"></ul>
+      </div>
+      <div class="col-md-6 result-card">
+        <h5>Number Plates</h5>
+        <ul id="plateList" class="list-group"></ul>
+      </div>
+    </div>
+
+    <div class="card result-card">
+      <div class="card-header">Annotated Image</div>
+      <div class="card-body text-center">
+        <img id="annotatedImg" class="img-fluid" alt="Annotated Result">
+      </div>
+    </div>
+
+    <hr/>
+
+    <!-- Video Detection Section -->
+    <div class="card mb-4">
+      <div class="card-header">Upload Vehicle Video</div>
+      <div class="card-body">
+        <form id="uploadVideoForm">
+          <div class="form-group"></div>
+            <input type="file" id="videoInput" name="video" accept="video/*" class="form-control-file" required>
+          </div>
+          <button type="submit" class="btn btn-primary">Analyze Video</button>
+        </form>
+      </div>
+    </div>
+
+    <div class="card result-card">
+      <div class="card-header">Recognized Plate Numbers</div>
+      <div class="card-body" id="videoPlateText">
+        <!-- Plate texts will be inserted here -->
+      </div>
+    </div>
+
+    <div class="card result-card mb-5">
+      <div class="card-header">Annotated Video</div>
+      <div class="card-body text-center">
+        <video id="annotatedVideo" controls class="w-100" style="max-width:600px;"></video>
+      </div>
+    </div>
+  </div>
+
+  <script>
+    document.getElementById("uploadForm").addEventListener("submit", async (e) => {
+      e.preventDefault();
+      const file = document.getElementById("fileInput").files[0];
+      if (!file) {
+        alert("No file selected!");
+        return;
+      }
+      const formData = new FormData();
+      formData.append("file", file);
+      const res = await fetch("http://127.0.0.1:8000/predict_ocr", { method: "POST", body: formData });
+      if (!res.ok) { alert("Error uploading file."); return; }
+      const data = await res.json();
+      const vehicleList = document.getElementById("vehicleList");
+      vehicleList.innerHTML = "";
+      data.vehicle_types.forEach((vType) => {
+        const li = document.createElement("li");
+        li.textContent = vType;
+        li.className = "list-group-item";
+        vehicleList.appendChild(li);
+      });
+      const plateList = document.getElementById("plateList");
+      plateList.innerHTML = "";
+      data.recognized_plates.forEach((plate) => {
+        const li = document.createElement("li");
+        li.textContent = plate;
+        li.className = "list-group-item";
+        plateList.appendChild(li);
+      });
+      if (data.annotated_image) {
+        document.getElementById("annotatedImg").src = `data:image/png;base64,${data.annotated_image}`;
+      }
+    });
+
+    document.getElementById("uploadVideoForm").addEventListener("submit", async (e) => {
+      e.preventDefault();
+      const file = document.getElementById("videoInput").files[0];
+      if (!file) { alert("No video file selected!"); return; }
+      const formData = new FormData();
+      formData.append("file", file);
+      const res = await fetch("http://127.0.0.1:8000/predict_video", { method: "POST", body: formData });
+      if (!res.ok) { alert("Error uploading video."); return; }
+      const data = await res.json();
+      const videoPlateText = document.getElementById("videoPlateText");
+      videoPlateText.innerHTML = "";
+      data.video_recognized_plates.forEach((plate) => {
+        const p = document.createElement("p");
+        p.textContent = plate;
+        videoPlateText.appendChild(p);
+      });
+      if (data.annotated_video) {
+        document.getElementById("annotatedVideo").src = `data:video/mp4;base64,${data.annotated_video}`;
+      }
+    });
+  </script>
+</body>
+</html>
