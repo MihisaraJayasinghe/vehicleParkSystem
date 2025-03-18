@@ -248,39 +248,23 @@ async def add_vehicle(vehicle: dict = Body(...)):
         return JSONResponse({"error": f"Failed to add vehicle: {str(e)}"}, status_code=500)
 
 @app.post("/remove_vehicle")
-async def remove_vehicle(vehicle: VehicleRemoval):
+async def remove_vehicle(data: dict = Body(...)):
     try:
-        parked_vehicle = vehicles_collection.find_one({
-            "license_plate": vehicle.license_plate,
-            "in_parking": True
-        })
-        
-        if not parked_vehicle:
+        license_plate = data.get("license_plate")
+        if not license_plate:
+            return JSONResponse({"error": "License plate is required"}, status_code=400)
+
+        vehicle = vehicles_collection.find_one({"license_plate": license_plate, "in_parking": True})
+        if not vehicle:
             return JSONResponse({"error": "Vehicle not found"}, status_code=404)
-            
-        fee = fee_calculator.calculate_fee(
-            parked_vehicle["time_in"],
-            parked_vehicle.get("is_employee", False)
-        )
-        
-        vehicles_collection.update_one(
-            {"_id": parked_vehicle["_id"]},
-            {
-                "$set": {
-                    "in_parking": False,
-                    "time_out": datetime.utcnow(),
-                    "parking_fee": fee
-                }
-            }
-        )
-        
-        return {
-            "message": "Vehicle removed successfully",
-            "fee": fee
-        }
-        
+
+        # Remove vehicle from database
+        vehicles_collection.delete_one({"license_plate": license_plate})
+
+        return JSONResponse({"message": "Vehicle removed successfully"})
     except Exception as e:
-        return JSONResponse({"error": f"Failed to remove vehicle: {str(e)}"}, status_code=500)
+        logger.error(f"Error removing vehicle: {str(e)}")
+        return JSONResponse({"error": "Failed to remove vehicle"}, status_code=500)
 
 @app.get("/parking_status")
 async def get_parking_status():

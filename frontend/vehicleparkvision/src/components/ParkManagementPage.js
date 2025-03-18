@@ -14,7 +14,6 @@ function ParkManagement() {
     try {
       const res = await fetch('http://127.0.0.1:8000/get_parked_vehicles');
       const data = await res.json();
-      // Use vehicles from data
       setVehicles(data.vehicles);
     } catch (error) {
       console.error('Error fetching vehicles:', error);
@@ -29,30 +28,27 @@ function ParkManagement() {
       showCancelButton: true,
       confirmButtonText: 'Yes, remove it!'
     });
-
+  
     if (result.isConfirmed) {
       try {
         const res = await fetch('http://127.0.0.1:8000/remove_vehicle', {
-          method: 'POST',
+          method: 'POST', // Changed back to POST
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({ license_plate: licensePlate })
         });
-        
+  
         const data = await res.json();
-        if (data.fee !== undefined) {
-          await Swal.fire(
-            'Vehicle Removed',
-            `Parking fee: $${data.fee}`,
-            'success'
-          );
-          fetchVehicles();
+        if (res.ok) {
+          await Swal.fire('Vehicle Removed', data.message || 'The vehicle has been removed successfully.', 'success');
+          fetchVehicles(); // Refresh the list
+        } else {
+          Swal.fire('Error', data.error || 'Failed to remove vehicle', 'error');
         }
       } catch (error) {
         Swal.fire('Error', 'Failed to remove vehicle', 'error');
       }
     }
   };
-
   return (
     <div className="container mt-4">
       <h2>Parking Management</h2>
@@ -75,7 +71,6 @@ function ParkManagement() {
               <th>License Plate</th>
               <th>Vehicle Type</th>
               <th>Parking Status</th>
-              <th>Parking Slot</th>
               <th>Time In</th>
               <th>Actions</th>
             </tr>
@@ -92,13 +87,11 @@ function ParkManagement() {
                       {vehicle.parking_state || 'Booked'}
                     </span>
                   </td>
-                  <td>{vehicle.parking_slot || 'Not assigned'}</td>
                   <td>{new Date(vehicle.time_in).toLocaleString()}</td>
                   <td>
                     <Button
                       variant="danger"
                       onClick={() => handleRemoveVehicle(vehicle.license_plate)}
-                      disabled={vehicle.parking_state === 'booked'}
                     >
                       Remove
                     </Button>
