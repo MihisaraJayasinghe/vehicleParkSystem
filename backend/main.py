@@ -1,558 +1,232 @@
-from fastapi import FastAPI, File, UploadFile, Body
+# main.py
+
+import logging
+import base64
+import cv2
+import numpy as np
+from datetime import datetime
+
+from fastapi import FastAPI, File, UploadFile, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel
+
 import uvicorn
-import logging
-from typing import Optional, Dict, Any
-from datetime import datetime
-from models.database_models import User, UserLogin, ParkingSlot, Employee
-
-logger = logging.getLogger(__name__)
-logging.basicConfig(level=logging.INFO)
-
-class BookingRequest(BaseModel):
-    vehicle_plate: str
-
-class BookingResponseData(BaseModel):
-    slot_id: str
-    vehicle_plate: str
-    booked_at: str
-    user: Dict[str, str]
-
-class BookingResponse(BaseModel):
-    success: bool
-    message: str
-    data: Optional[BookingResponseData] = None
-    error: Optional[str] = None
-
-import cv2
-import numpy as np
-import io
-import base64
-import tempfile
-
 from ultralytics import YOLO
 import easyocr
 
-import os
-from pymongo import MongoClient
-from dotenv import load_dotenv
+# ML service
 from app.slot_service import SlotDetectionService
-from services.fee_calculator import ParkingFeeCalculator
-from models.parking_models import VehicleEntry, VehicleRemoval
 
-# Add logging
-import logging
+# Mongo-backed parking slot CRUD
+from parking_slot_crud import (
+    init_slots,
+    book_slot,
+    park_slot,
+    get_all_slots,
+    clear_slot,
+    slots as slots_collection
+)
+
+# Mongo-backed employee plates
+from employee_vehicle_model import init_employee_table, get_all_employee_plates
+
+# Mongo-backed auth
+from user_auth_mongo import register_user, login_user
+
+# --- Logging setup ---
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-# Fix the .env loading and MongoDB connection
-load_dotenv(dotenv_path="/Users/mihisarajayasinghe/Downloads/vehiclepark/backend/.env")
-MONGO_URI = os.getenv("MONGO_URI")
-
-if not MONGO_URI:
-    logger.error("MONGO_URI not found in .env file")
-    raise ValueError("MONGO_URI environment variable is not set")
-
-try:
-    client = MongoClient(MONGO_URI)
-    client.admin.command('ping')
-    logger.info("Successfully connected to MongoDB Atlas")
-    
-    # Initialize database and collections in module scope
-    db = client.parkvision_db
-    vehicles_collection = db.vehicles
-    parking_slots_collection = db.parking_slots
-    # NEW: Initialize new collection for vehicle records
-    vehicle_records = db.vehicle_records
-
-    # Initialize services
-    from services.database_service import DatabaseService
-    from services.booking_service import BookingService
-    db_service = DatabaseService(MONGO_URI)
-    booking_service = BookingService(db_service.users, parking_slots_collection)
-    
-    # Initialize slots if empty
-    if parking_slots_collection.count_documents({}) == 0:
-        slots = [
-            {
-                "slot_id": str(i+1),
-                "status": "free",
-                "plate_number": None,
-                "booking_time": None,
-                "parking_time": None
-            } 
-            for i in range(100)
-        ]
-        parking_slots_collection.insert_many(slots)
-        logger.info("Initialized 100 parking slots")
-
-    # Initialize vehicles collection if needed
-    if vehicles_collection.count_documents({}) == 0:
-        logger.info("Vehicles collection is ready")
-
-except Exception as e:
-    logger.error(f"Failed to connect to MongoDB Atlas: {str(e)}")
-    raise
-
+# --- FastAPI setup ---
 app = FastAPI()
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],  # Allow all origins for development
+    allow_origins=["*"],
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
 )
 
-# 2) Load your custom YOLO model (ensure the path is correct)
+# --- Load ML models ---
+logger.info("Loading YOLO model…")
 model = YOLO("best5.pt")
 
-# 3) Create an EasyOCR Reader (adjust as needed)
+logger.info("Starting EasyOCR reader…")
 reader = easyocr.Reader(['en'], gpu=False)
 
-# 4) Class labels (adjust as necessary)
 class_names = {
-    0: 'Lorry',
-    1: 'bike',
-    2: 'bus',
-    3: 'car',
-    4: 'number plate',
-    5: 'three wheeler',
-    6: 'three wheeler',
-    7: 'van'
+    0: 'Lorry', 1: 'bike', 2: 'bus', 3: 'car',
+    4: 'number plate', 5: 'three wheeler',
+    6: 'three wheeler', 7: 'van'
 }
 
-# Initialize services for slot detection and fee calculation
-slot_service = SlotDetectionService(model_path="/Users/mihisarajayasinghe/Downloads/vehiclepark/backend/parking.pt")
-fee_calculator = ParkingFeeCalculator()
+# --- Initialize DB on startup ---
+init_employee_table()
+init_slots(count=100)
 
-from services.database_service import DatabaseService
+# --- Auth request schema ---
+class UserAuth(BaseModel):
+    username: str
+    vehicle_plate: str
 
-db_service = DatabaseService(MONGO_URI)
+# --- 0) Register new user ---
+@app.post("/register")
+def api_register(user: UserAuth):
+    try:
+        doc = register_user(user.username, user.vehicle_plate)
+        return {
+            "success": True,
+            "user": {
+                "username": doc["username"],
+                "vehicle_plate": doc["vehicle_plate"],
+               
+            }
+        }
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    
+# --- 00) Login existing user ---
+@app.post("/login")
+def api_login(user: UserAuth):
+    try:
+        doc = login_user(user.username, user.vehicle_plate)
+        return {
+            "success": True,
+            "user": {
+                "username": doc["username"],
+                "vehicle_plate": doc["vehicle_plate"],
+               
+            }
+        }
+    except ValueError as e:
+        raise HTTPException(status_code=401, detail=str(e))
 
+# --- ML OCR endpoint ---
 @app.post("/predict_ocr")
 async def predict_ocr(file: UploadFile = File(...)):
     try:
         contents = await file.read()
-        np_img = np.frombuffer(contents, np.uint8)
-        image_bgr = cv2.imdecode(np_img, cv2.IMREAD_COLOR)
+        img = cv2.imdecode(np.frombuffer(contents, np.uint8), cv2.IMREAD_COLOR)
+        if img is None:
+            raise HTTPException(400, "Invalid image")
 
-        if image_bgr is None:
-            return JSONResponse({"error": "Could not decode image"}, status_code=400)
+        det = model.predict(source=img, conf=0.5)[0]
+        annotated = det.plot()
 
-        results = model.predict(source=image_bgr, conf=0.5)
-        detections = results[0]
-        annotated_img = detections.plot()
-
-        vehicle_types = []
-        recognized_plates = []
-
-        for box in detections.boxes:
+        vehicles, plates = [], []
+        for box in det.boxes:
             cls_id = int(box.cls[0])
-            class_name = class_names.get(cls_id, "unknown")
-            conf = float(box.conf[0])
+            name = class_names.get(cls_id, "unknown")
             x1, y1, x2, y2 = map(int, box.xyxy[0].tolist())
 
-            if class_name == "number plate":
-                plate_region = image_bgr[y1:y2, x1:x2]
-                # Zoom (enlarge) the detected plate region for better OCR
-                zoomed_plate = cv2.resize(plate_region, None, fx=2, fy=2, interpolation=cv2.INTER_CUBIC)
-                # Pre-processing: convert to grayscale and blur
-                gray_plate = cv2.cvtColor(zoomed_plate, cv2.COLOR_BGR2GRAY)
-                filtered_plate = cv2.bilateralFilter(gray_plate, 11, 17, 17)
-                # Fixed binary threshold: adjust value as needed
-                ret, thresh_plate = cv2.threshold(filtered_plate, 100, 255, cv2.THRESH_BINARY)
-                # Ensure white background with black text (invert if needed)
-                if cv2.mean(thresh_plate)[0] < 127:
-                    thresh_plate = cv2.bitwise_not(thresh_plate)
-                processed_plate = cv2.cvtColor(thresh_plate, cv2.COLOR_GRAY2RGB)
-                ocr_results = reader.readtext(processed_plate)
-                if ocr_results:
-                    recognized_str = " ".join([res[1] for res in ocr_results])
-                    recognized_plates.append(recognized_str)
-                    cv2.putText(
-                        annotated_img,
-                        recognized_str,
-                        (x1, max(y1 - 10, 0)),
-                        cv2.FONT_HERSHEY_SIMPLEX,
-                        0.7, (0, 255, 255), 2
-                    )
+            if name == "number plate":
+                crop = img[y1:y2, x1:x2]
+                crop = cv2.resize(crop, None, fx=2, fy=2, interpolation=cv2.INTER_CUBIC)
+                gray = cv2.cvtColor(crop, cv2.COLOR_BGR2GRAY)
+                blur = cv2.bilateralFilter(gray, 11, 17, 17)
+                _, thresh = cv2.threshold(blur, 100, 255, cv2.THRESH_BINARY)
+                if cv2.mean(thresh)[0] < 127:
+                    thresh = cv2.bitwise_not(thresh)
+                proc = cv2.cvtColor(thresh, cv2.COLOR_GRAY2RGB)
+                ocr = reader.readtext(proc)
+                if ocr:
+                    txt = " ".join([o[1] for o in ocr])
+                    plates.append(txt)
+                    cv2.putText(annotated, txt, (x1, max(y1-10,0)),
+                                cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0,255,255), 2)
             else:
-                vehicle_types.append(class_name)
-                cv2.putText(
-                    annotated_img,
-                    class_name,
-                    (x1, max(y1 - 10, 0)),
-                    cv2.FONT_HERSHEY_SIMPLEX,
-                    0.7, (0, 255, 0), 2
-                )
+                vehicles.append(name)
+                cv2.putText(annotated, name, (x1, max(y1-10,0)),
+                            cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0,255,0), 2)
 
-        success, encoded_image = cv2.imencode(".png", annotated_img)
-        if not success:
-            return JSONResponse({"error": "Failed to encode annotated image"}, status_code=500)
-        b64_string = base64.b64encode(encoded_image.tobytes()).decode("utf-8")
+        ok, png = cv2.imencode(".png", annotated)
+        if not ok:
+            raise RuntimeError("Failed to encode image")
+        b64 = base64.b64encode(png.tobytes()).decode()
 
-        response_data = {
-            "vehicle_types": vehicle_types,
-            "recognized_plates": recognized_plates,
-            "annotated_image": b64_string
-        }
-        return JSONResponse(response_data)
-
+        return {"vehicle_types": vehicles, "recognized_plates": plates, "annotated_image": b64}
     except Exception as e:
-        return JSONResponse({"error": str(e)}, status_code=500)
+        logger.error(f"/predict_ocr error: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
 
-# NEW: Import the new model
-from models.database_models import VehicleRecord
-
-@app.post("/add_vehicle")
-async def add_vehicle(vehicle: dict = Body(...)):
-    try:
-        logger.info(f"Adding vehicle: {vehicle}")
-        vehicle_type = vehicle.get("vehicle_type")
-        license_plate = vehicle.get("license_plate")
-        is_employee = vehicle.get("is_employee", False)
-        
-        if not vehicle_type or not license_plate:
-            return JSONResponse({"error": "Missing vehicle_type or license_plate"}, status_code=400)
-            
-        current_time = datetime.utcnow()
-        new_record = {
-            "vehicle_type": vehicle_type,
-            "license_plate": license_plate,
-            "is_employee": is_employee,
-            "in_parking": True,
-            "time_in": current_time
-        }
-        
-        # Insert into vehicles collection
-        result = vehicles_collection.insert_one(new_record)
-        
-        # NEW: Also insert into the vehicle_records collection using the new model data
-        vehicle_record = VehicleRecord(
-            vehicle_type=vehicle_type,
-            license_plate=license_plate,
-            is_employee=is_employee,
-            time_in=current_time
-        )
-        vehicle_records.insert_one(vehicle_record.dict())
-        
-        return JSONResponse({
-            "message": "Vehicle added successfully",
-            "id": str(result.inserted_id)
-        })
-        
-    except Exception as e:
-        logger.error(f"Error adding vehicle: {str(e)}")
-        return JSONResponse({"error": f"Failed to add vehicle: {str(e)}"}, status_code=500)
-
-@app.post("/remove_vehicle")
-async def remove_vehicle(data: dict = Body(...)):
-    try:
-        license_plate = data.get("license_plate")
-        if not license_plate:
-            return JSONResponse({"error": "License plate is required"}, status_code=400)
-
-        vehicle = vehicles_collection.find_one({"license_plate": license_plate, "in_parking": True})
-        if not vehicle:
-            return JSONResponse({"error": "Vehicle not found"}, status_code=404)
-
-        # Remove vehicle from database
-        vehicles_collection.delete_one({"license_plate": license_plate})
-
-        return JSONResponse({"message": "Vehicle removed successfully"})
-    except Exception as e:
-        logger.error(f"Error removing vehicle: {str(e)}")
-        return JSONResponse({"error": "Failed to remove vehicle"}, status_code=500)
-
-@app.get("/parking_status")
-async def get_parking_status():
-    try:
-        total_slots = 100
-        parked_count = vehicles_collection.count_documents({"in_parking": True})
-        return {
-            "total_slots": total_slots,
-            "occupied_slots": parked_count,
-            "available_slots": total_slots - parked_count
-        }
-    except Exception as e:
-        return JSONResponse({"error": f"Failed to get parking status: {str(e)}"}, status_code=500)
-
-@app.get("/get_parked_vehicles")
-async def get_parked_vehicles():
-    try:
-        cursor = vehicles_collection.find({"in_parking": True})
-        vehicles = []
-        
-        for doc in cursor:
-            vehicles.append({
-                "id": str(doc["_id"]),
-                "vehicle_type": doc.get("vehicle_type", ""),
-                "license_plate": doc.get("license_plate", ""),
-                "time_in": doc.get("time_in", datetime.utcnow()).isoformat(),
-                "is_employee": doc.get("is_employee", False),
-                "parking_slot": doc.get("parking_slot", None),
-                "parking_state": doc.get("parking_state", "booked")  # 'booked' or 'parked'
-            })
-        
-        return JSONResponse(content={"vehicles": vehicles})
-        
-    except Exception as e:
-        logger.error(f"Error getting parked vehicles: {str(e)}")
-        return JSONResponse({"error": f"Failed to get vehicles: {str(e)}"}, status_code=500)
+# --- ML slot detection ---
+slot_service = SlotDetectionService(model_path="parking.pt")
 
 @app.post("/detect_slots")
 async def detect_slots(file: UploadFile = File(...)):
     try:
-        contents = await file.read()
-        result = slot_service.detect_slots(contents)
-        return JSONResponse(result)
+        data = await file.read()
+        return slot_service.detect_slots(data)
     except Exception as e:
-        return JSONResponse({"error": str(e)}, status_code=500)
+        logger.error(f"/detect_slots error: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
 
-@app.post("/register_user")
-async def register_user(user: User):
-    return await db_service.register_user(user)
+# --- SlotAction & ClearAction schemas ---
+class SlotAction(BaseModel):
+    slot_id: int
+    vehicle_plate: str
 
-@app.post("/login")
-async def login(login_data: UserLogin):
+class ClearAction(BaseModel):
+    slot_id: int
+    rate_per_hour: float = 10.0
+
+# --- 1) Book a slot ---
+@app.post("/slots/book")
+def api_book_slot(req: SlotAction):
     try:
-        logger.info(f"Login attempt for user: {login_data.name} with vehicle: {login_data.vehicle_plate}")
-        result = await db_service.login_user(login_data)
-        logger.info(f"Login result: {result}")
-        
-        if "error" in result:
-            logger.warning(f"Login failed: {result['error']}")
-            return JSONResponse(status_code=401, content=result)
-        
-        return JSONResponse(status_code=200, content=result)
+        updated = book_slot(req.slot_id, req.vehicle_plate)
+        return JSONResponse(updated)
     except Exception as e:
-        logger.error(f"Login error: {str(e)}")
-        import traceback
-        logger.error(f"Traceback: {traceback.format_exc()}")
-        return JSONResponse(status_code=500, content={"error": f"Failed to process login request: {str(e)}"})
+        raise HTTPException(status_code=400, detail=str(e))
 
-@app.get("/available_slots")
-async def get_available_slots():
+# --- 2) Park a booked slot ---
+@app.post("/slots/park")
+def api_park_slot(req: SlotAction):
     try:
-        slots = await db_service.get_available_slots()
-        for slot in slots:
-            if '_id' in slot:
-                slot['_id'] = str(slot['_id'])
-        return slots
+        updated = park_slot(req.slot_id, req.vehicle_plate)
+        # return datetime as ISO
+        updated["parked_time"] = updated["parked_time"].isoformat()
+        return JSONResponse(updated)
     except Exception as e:
-        logger.error(f"Error getting available slots: {str(e)}")
-        return JSONResponse(status_code=500, content={"error": "Failed to get parking slots"})
-    
-@app.post("/book_slot/{slot_id}")
-async def book_slot(slot_id: str, booking_data: dict = Body(...)):
+        raise HTTPException(status_code=400, detail=str(e))
+
+# --- 3) List all slots ---
+@app.get("/slots")
+def api_list_slots():
+    all_slots = get_all_slots()
+    # convert any datetime fields
+    for s in all_slots:
+        if s.get("parked_time"):
+            s["parked_time"] = s["parked_time"].isoformat()
+    return JSONResponse(all_slots)
+
+# --- 4) Clear slot & compute fee ---
+@app.post("/slots/clear")
+def api_clear_slot(req: ClearAction):
     try:
-        logger.info(f"Raw booking data: {booking_data}")
-        
-        if not isinstance(booking_data, dict) or 'vehicle_plate' not in booking_data:
-            return JSONResponse(
-                status_code=422,
-                content={
-                    "detail": [{
-                        "loc": ["body", "vehicle_plate"],
-                        "msg": "Vehicle plate is required",
-                        "type": "value_error"
-                    }]
-                }
-            )
-        
-        vehicle_plate = booking_data['vehicle_plate']
-        logger.info(f"Processing booking for slot {slot_id} with vehicle {vehicle_plate}")
-        
-        result = await booking_service.book_slot(slot_id, vehicle_plate)
-        logger.info(f"Booking result: {result}")
-        
-        if "error" in result:
-            return JSONResponse(
-                status_code=400,
-                content={
-                    "success": False,
-                    "message": "Booking failed",
-                    "error": result["error"]
-                }
-            )
-        
-        return {
-            "success": True,
-            "message": result["message"],
-            "data": result["data"]
-        }
-        
+        info = clear_slot(req.slot_id, req.rate_per_hour)
+        # info contains datetime fields
+        info["parked_time"] = info["parked_time"].isoformat()
+        info["cleared_time"] = info["cleared_time"].isoformat()
+        return JSONResponse(info)
     except Exception as e:
-        logger.error(f"Error in book_slot endpoint: {str(e)}")
-        return JSONResponse(
-            status_code=500,
-            content={
-                "success": False,
-                "message": "Internal server error",
-                "error": str(e)
-            }
-        )
+        raise HTTPException(status_code=400, detail=str(e))
 
-@app.post("/park_vehicle/{vehicle_plate}")
-async def park_vehicle(vehicle_plate: str):
-    return await db_service.park_vehicle(vehicle_plate)
+# --- 5) Parked employee slots ---
+@app.get("/slots/parked-employees")
+def api_parked_employees():
+    plates = get_all_employee_plates()
+    docs = slots_collection.find(
+        {"status": "parked", "parked_vehicle_plate": {"$in": plates}},
+        {"_id": 0}
+    )
+    result = list(docs)
+    for s in result:
+        if s.get("parked_time"):
+            s["parked_time"] = s["parked_time"].isoformat()
+    return JSONResponse(result)
 
-@app.post("/remove_parked_vehicle/{slot_id}")
-async def remove_parked_vehicle(slot_id: str, vehicle_plate: str):
-    return await db_service.remove_vehicle(slot_id, vehicle_plate)
-
-@app.get("/parking-slots")
-async def get_parking_slots():
-    try:
-        slots = list(parking_slots_collection.find({}, {'_id': 0}))
-        return JSONResponse(content={"slots": slots})
-    except Exception as e:
-        logger.error(f"Error getting parking slots: {str(e)}")
-        return JSONResponse(
-            {"error": "Failed to get parking slots"}, 
-            status_code=500
-        )
-
-@app.post("/book-slot/{slot_id}")
-async def book_parking_slot(slot_id: str, plate_number: str = Body(...)):
-    try:
-        # Check if slot is available
-        slot = parking_slots_collection.find_one({"slot_id": slot_id})
-        if not slot or slot["status"] != "free":
-            return JSONResponse(
-                {"error": "Slot not available"}, 
-                status_code=400
-            )
-
-        # Update slot status
-        parking_slots_collection.update_one(
-            {"slot_id": slot_id},
-            {
-                "$set": {
-                    "status": "booked",
-                    "plate_number": plate_number,
-                    "booking_time": datetime.utcnow()
-                }
-            }
-        )
-
-        # Update vehicle status in vehicles collection
-        vehicles_collection.update_one(
-            {"license_plate": plate_number},
-            {
-                "$set": {
-                    "parking_state": "booked",
-                    "parking_slot": slot_id
-                }
-            }
-        )
-
-        return JSONResponse({"message": "Slot booked successfully"})
-    except Exception as e:
-        logger.error(f"Error booking slot: {str(e)}")
-        return JSONResponse(
-            {"error": "Failed to book slot"}, 
-            status_code=500
-        )
-
-@app.post("/park-vehicle/{slot_id}")
-async def mark_vehicle_parked(slot_id: str):
-    try:
-        # Find the booked slot
-        slot = parking_slots_collection.find_one({"slot_id": slot_id})
-        if not slot or slot["status"] != "booked":
-            return JSONResponse(
-                {"error": "Slot not booked"}, 
-                status_code=400
-            )
-
-        # Update slot status
-        parking_slots_collection.update_one(
-            {"slot_id": slot_id},
-            {
-                "$set": {
-                    "status": "parked",
-                    "parking_time": datetime.utcnow()
-                }
-            }
-        )
-
-        # Update vehicle status
-        vehicles_collection.update_one(
-            {"license_plate": slot["plate_number"]},
-            {
-                "$set": {
-                    "parking_state": "parked"
-                }
-            }
-        )
-
-        return JSONResponse({"message": "Vehicle marked as parked"})
-    except Exception as e:
-        logger.error(f"Error updating parking status: {str(e)}")
-        return JSONResponse(
-            {"error": "Failed to update parking status"}, 
-            status_code=500
-        )
-
-@app.post("/remove-vehicle/{slot_id}")
-async def remove_parked_vehicle(slot_id: str):
-    try:
-        slot = parking_slots_collection.find_one({"slot_id": slot_id})
-        if not slot:
-            return JSONResponse(
-                {"error": "Slot not found"}, 
-                status_code=404
-            )
-
-        # Reset slot status
-        parking_slots_collection.update_one(
-            {"slot_id": slot_id},
-            {
-                "$set": {
-                    "status": "free",
-                    "plate_number": None,
-                    "booking_time": None,
-                    "parking_time": None
-                }
-            }
-        )
-
-        # Update vehicle status if there was a vehicle
-        if slot.get("plate_number"):
-            vehicles_collection.update_one(
-                {"license_plate": slot["plate_number"]},
-                {
-                    "$set": {
-                        "parking_state": None,
-                        "parking_slot": None,
-                        "in_parking": False,
-                        "time_out": datetime.utcnow()
-                    }
-                }
-            )
-
-        return JSONResponse({"message": "Slot cleared successfully"})
-    except Exception as e:
-        logger.error(f"Error removing vehicle: {str(e)}")
-        return JSONResponse(
-            {"error": "Failed to remove vehicle"}, 
-            status_code=500
-        )
-
-@app.get("/slot-allocations")
-async def get_slot_allocations():
-    try:
-        slots = list(db.slot_allocations.find({}, {'_id': 0}))
-        return JSONResponse(content={"slots": slots})
-    except Exception as e:
-        logger.error(f"Error getting slot allocations: {str(e)}")
-        return JSONResponse(
-            {"error": "Failed to get slot allocations"}, 
-            status_code=500
-        )
-
+# --- Run the app ---
 if __name__ == "__main__":
     uvicorn.run(app, host="0.0.0.0", port=8000)
