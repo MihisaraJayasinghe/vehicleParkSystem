@@ -18,7 +18,7 @@ export default function App() {
       <Stack.Navigator initialRouteName="Login">
         <Stack.Screen name="Login"    component={LoginScreen}    options={{ headerShown:false }} />
         <Stack.Screen name="Register" component={RegisterScreen} options={{ title:'Register' }} />
-        <Stack.Screen name="Booking"  component={BookingScreen}  options={{ title:'Book a Slot' }} />
+        <Stack.Screen name="Book"  component={BookingScreen}  options={{ title:'Book a Slot' }} />
         <Stack.Screen name="Remove"   component={RemoveScreen}   options={{ title:'Clear a Slot' }} />
         
         <Stack.Screen name="Home"     component={HomeScreen}     options={{ title:'Slots Overview' }} />

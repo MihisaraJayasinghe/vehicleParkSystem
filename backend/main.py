@@ -6,19 +6,18 @@ import cv2
 import numpy as np
 from datetime import datetime
 
-from fastapi import FastAPI, File, UploadFile, HTTPException
+from fastapi import FastAPI, File, UploadFile, HTTPException, Query
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
+from fastapi.encoders import jsonable_encoder
 from pydantic import BaseModel
 
 import uvicorn
 from ultralytics import YOLO
 import easyocr
 
-# ML service
+# ---------- local modules ----------
 from app.slot_service import SlotDetectionService
-
-# Mongo-backed parking slot CRUD
 from parking_slot_crud import (
     init_slots,
     book_slot,
@@ -27,12 +26,9 @@ from parking_slot_crud import (
     clear_slot,
     slots as slots_collection
 )
-
-# Mongo-backed employee plates
 from employee_vehicle_model import init_employee_table, get_all_employee_plates
-
-# Mongo-backed auth
 from user_auth_mongo import register_user, login_user
+# -----------------------------------
 
 # --- Logging setup ---
 logging.basicConfig(level=logging.INFO)
@@ -51,7 +47,6 @@ app.add_middleware(
 # --- Load ML models ---
 logger.info("Loading YOLO model…")
 model = YOLO("best5.pt")
-
 logger.info("Starting EasyOCR reader…")
 reader = easyocr.Reader(['en'], gpu=False)
 
@@ -60,47 +55,88 @@ class_names = {
     4: 'number plate', 5: 'three wheeler',
     6: 'three wheeler', 7: 'van'
 }
+slot_service = SlotDetectionService(model_path="parking.pt")
 
 # --- Initialize DB on startup ---
 init_employee_table()
 init_slots(count=100)
 
-# --- Auth request schema ---
+# --- Pydantic schemas ---
 class UserAuth(BaseModel):
     username: str
     vehicle_plate: str
 
-# --- 0) Register new user ---
+class SlotAction(BaseModel):
+    slot_id: int
+    vehicle_plate: str
+
+class ClearAction(BaseModel):
+    slot_id: int
+    rate_per_hour: float = 10.0
+
+# --- Auth endpoints ---
 @app.post("/register")
-def api_register(user: UserAuth):
+def api_register(u: UserAuth):
     try:
-        doc = register_user(user.username, user.vehicle_plate)
-        return {
-            "success": True,
-            "user": {
-                "username": doc["username"],
-                "vehicle_plate": doc["vehicle_plate"],
-               
-            }
-        }
+        doc = register_user(u.username, u.vehicle_plate)
+        return {"success": True, "user": {"username": doc["username"], "vehicle_plate": doc["vehicle_plate"]}}
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
-    
-# --- 00) Login existing user ---
+
 @app.post("/login")
-def api_login(user: UserAuth):
+def api_login(u: UserAuth):
     try:
-        doc = login_user(user.username, user.vehicle_plate)
-        return {
-            "success": True,
-            "user": {
-                "username": doc["username"],
-                "vehicle_plate": doc["vehicle_plate"],
-               
-            }
-        }
+        doc = login_user(u.username, u.vehicle_plate)
+        return {"success": True, "user": {"username": doc["username"], "vehicle_plate": doc["vehicle_plate"]}}
     except ValueError as e:
         raise HTTPException(status_code=401, detail=str(e))
+
+# --- Slot-init endpoint ---
+@app.post("/slots/init")
+def api_init_slots(count: int = Query(100, ge=1, le=1000)):
+    init_slots(count)
+    return {"message": f"Initialized {count} slots"}
+
+# --- Slot CRUD endpoints ---
+@app.post("/slots/book")
+def api_book_slot(action: SlotAction):
+    try:
+        updated = book_slot(action.slot_id, action.vehicle_plate)
+        updated.pop("_id", None)  # remove MongoDB internal ID
+        return JSONResponse(jsonable_encoder(updated))
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
+@app.post("/slots/park")
+def api_park_slot(action: SlotAction):
+    try:
+        updated = park_slot(action.slot_id, action.vehicle_plate)
+        updated.pop("_id", None)
+        return JSONResponse(jsonable_encoder(updated))
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
+@app.get("/slots")
+def api_list_slots():
+    slots = get_all_slots()
+    return JSONResponse(jsonable_encoder(slots))
+
+@app.post("/slots/clear")
+def api_clear_slot(action: ClearAction):
+    try:
+        info = clear_slot(action.slot_id, action.rate_per_hour)
+        return JSONResponse(jsonable_encoder(info))
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
+@app.get("/slots/parked-employees")
+def api_parked_employees():
+    plates = get_all_employee_plates()
+    docs = list(slots_collection.find(
+        {"status": "parked", "parked_vehicle_plate": {"$in": plates}},
+        {"_id": 0}
+    ))
+    return JSONResponse(jsonable_encoder(docs))
 
 # --- ML OCR endpoint ---
 @app.post("/predict_ocr")
@@ -109,9 +145,9 @@ async def predict_ocr(file: UploadFile = File(...)):
         contents = await file.read()
         img = cv2.imdecode(np.frombuffer(contents, np.uint8), cv2.IMREAD_COLOR)
         if img is None:
-            raise HTTPException(400, "Invalid image")
+            raise HTTPException(status_code=400, detail="Invalid image")
 
-        det = model.predict(source=img, conf=0.5)[0]
+        det = model.predict(img, conf=0.5)[0]
         annotated = det.plot()
 
         vehicles, plates = [], []
@@ -131,9 +167,9 @@ async def predict_ocr(file: UploadFile = File(...)):
                 proc = cv2.cvtColor(thresh, cv2.COLOR_GRAY2RGB)
                 ocr = reader.readtext(proc)
                 if ocr:
-                    txt = " ".join([o[1] for o in ocr])
-                    plates.append(txt)
-                    cv2.putText(annotated, txt, (x1, max(y1-10,0)),
+                    text = " ".join([o[1] for o in ocr])
+                    plates.append(text)
+                    cv2.putText(annotated, text, (x1, max(y1-10,0)),
                                 cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0,255,255), 2)
             else:
                 vehicles.append(name)
@@ -150,9 +186,7 @@ async def predict_ocr(file: UploadFile = File(...)):
         logger.error(f"/predict_ocr error: {e}")
         raise HTTPException(status_code=500, detail=str(e))
 
-# --- ML slot detection ---
-slot_service = SlotDetectionService(model_path="parking.pt")
-
+# --- ML slot-detection endpoint ---
 @app.post("/detect_slots")
 async def detect_slots(file: UploadFile = File(...)):
     try:
@@ -161,71 +195,6 @@ async def detect_slots(file: UploadFile = File(...)):
     except Exception as e:
         logger.error(f"/detect_slots error: {e}")
         raise HTTPException(status_code=500, detail=str(e))
-
-# --- SlotAction & ClearAction schemas ---
-class SlotAction(BaseModel):
-    slot_id: int
-    vehicle_plate: str
-
-class ClearAction(BaseModel):
-    slot_id: int
-    rate_per_hour: float = 10.0
-
-# --- 1) Book a slot ---
-@app.post("/slots/book")
-def api_book_slot(req: SlotAction):
-    try:
-        updated = book_slot(req.slot_id, req.vehicle_plate)
-        return JSONResponse(updated)
-    except Exception as e:
-        raise HTTPException(status_code=400, detail=str(e))
-
-# --- 2) Park a booked slot ---
-@app.post("/slots/park")
-def api_park_slot(req: SlotAction):
-    try:
-        updated = park_slot(req.slot_id, req.vehicle_plate)
-        # return datetime as ISO
-        updated["parked_time"] = updated["parked_time"].isoformat()
-        return JSONResponse(updated)
-    except Exception as e:
-        raise HTTPException(status_code=400, detail=str(e))
-
-# --- 3) List all slots ---
-@app.get("/slots")
-def api_list_slots():
-    all_slots = get_all_slots()
-    # convert any datetime fields
-    for s in all_slots:
-        if s.get("parked_time"):
-            s["parked_time"] = s["parked_time"].isoformat()
-    return JSONResponse(all_slots)
-
-# --- 4) Clear slot & compute fee ---
-@app.post("/slots/clear")
-def api_clear_slot(req: ClearAction):
-    try:
-        info = clear_slot(req.slot_id, req.rate_per_hour)
-        # info contains datetime fields
-        info["parked_time"] = info["parked_time"].isoformat()
-        info["cleared_time"] = info["cleared_time"].isoformat()
-        return JSONResponse(info)
-    except Exception as e:
-        raise HTTPException(status_code=400, detail=str(e))
-
-# --- 5) Parked employee slots ---
-@app.get("/slots/parked-employees")
-def api_parked_employees():
-    plates = get_all_employee_plates()
-    docs = slots_collection.find(
-        {"status": "parked", "parked_vehicle_plate": {"$in": plates}},
-        {"_id": 0}
-    )
-    result = list(docs)
-    for s in result:
-        if s.get("parked_time"):
-            s["parked_time"] = s["parked_time"].isoformat()
-    return JSONResponse(result)
 
 # --- Run the app ---
 if __name__ == "__main__":

@@ -1,9 +1,13 @@
-import React, { useState, useRef } from 'react';
+import React, { useState, useEffect, useRef } from 'react';
 import { Link } from 'react-router-dom';
 import './ModernStyles.css';
 
 export default function VehicleDetectionPage() {
-  const [results, setResults] = useState({ vehicleTypes: [], recognizedPlates: [], annotatedImage: '' });
+  const [results, setResults] = useState({
+    vehicleTypes: [],
+    recognizedPlates: [],
+    annotatedImage: ''
+  });
   const [file, setFile] = useState(null);
   const [capturedUrl, setCapturedUrl] = useState('');
   const [webcamActive, setWebcamActive] = useState(false);
@@ -11,14 +15,23 @@ export default function VehicleDetectionPage() {
 
   // --- New state for parking ---
   const [slotToPark, setSlotToPark] = useState('');
+  const [plateNumber, setPlateNumber] = useState('');         // <-- manual plate input
   const [parkingMsg, setParkingMsg] = useState(null);
 
   const videoRef = useRef(null);
   const canvasRef = useRef(null);
   const streamRef = useRef(null);
 
-  // --- Webcam handlers ---
+  // Auto-fill plateNumber when OCR detects one
+  useEffect(() => {
+    if (results.recognizedPlates.length > 0) {
+      setPlateNumber(results.recognizedPlates[0]);
+    }
+  }, [results.recognizedPlates]);
+
+  // --- Webcam handlers (unchanged) ---
   const startWebcam = async () => {
+    setIsLoading(true);
     try {
       const stream = await navigator.mediaDevices.getUserMedia({ video: true });
       videoRef.current.srcObject = stream;
@@ -27,6 +40,8 @@ export default function VehicleDetectionPage() {
       setWebcamActive(true);
     } catch {
       alert('Unable to access webcam');
+    } finally {
+      setIsLoading(false);
     }
   };
   const stopWebcam = () => {
@@ -44,17 +59,15 @@ export default function VehicleDetectionPage() {
     setCapturedUrl(dataUrl);
     setFile(dataURLtoFile(dataUrl, 'capture.jpg'));
   };
-
-  // helper to convert dataURL → File
   const dataURLtoFile = (dataurl, filename) => {
     const [header, base] = dataurl.split(',');
     const mime = header.match(/:(.*?);/)[1];
     const bin = atob(base), arr = new Uint8Array(bin.length);
-    for (let i=0; i<bin.length; i++) arr[i] = bin.charCodeAt(i);
+    for (let i = 0; i < bin.length; i++) arr[i] = bin.charCodeAt(i);
     return new File([arr], filename, { type: mime });
   };
 
-  // --- Submit for detection ---
+  // --- Submit for detection (unchanged) ---
   const submitImage = async () => {
     if (!file) return alert('Select or capture an image first');
     setIsLoading(true);
@@ -76,11 +89,10 @@ export default function VehicleDetectionPage() {
     }
   };
 
-  // --- New: Park slot API call ---
+  // --- Park slot API call, now using plateNumber state ---
   const handleParkSlot = async () => {
-    if (!slotToPark || !results.recognizedPlates[0]) {
-      return alert("Enter a slot ID and detect a plate first");
-    }
+    if (!slotToPark) return alert("Enter a slot ID");
+    if (!plateNumber) return alert("Enter or detect a plate number");
     setParkingMsg(null);
     try {
       const res = await fetch("http://127.0.0.1:8000/slots/park", {
@@ -88,7 +100,7 @@ export default function VehicleDetectionPage() {
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
           slot_id: Number(slotToPark),
-          vehicle_plate: results.recognizedPlates[0]
+          vehicle_plate: plateNumber
         })
       });
       const data = await res.json();
@@ -100,7 +112,7 @@ export default function VehicleDetectionPage() {
   };
 
   return (
-    <div className="modern-container" style={{ position: 'relative' }}>
+    <div className="modern-container">
       {isLoading && (
         <div className="modern-spinner-overlay">
           <div className="modern-spinner" />
@@ -108,7 +120,7 @@ export default function VehicleDetectionPage() {
       )}
 
       <Link to="/" className="modern-back-button">← Home</Link>
-      <h2 className="modern-title">Vehicle & Plate Detector</h2>
+      <h2 className="modern-title">Vehicle & Plate Detection</h2>
 
       {/* File Upload */}
       <div className="modern-card">
@@ -125,9 +137,7 @@ export default function VehicleDetectionPage() {
             className="modern-button primary"
             onClick={submitImage}
             disabled={!file || isLoading}
-          >
-            Analyze
-          </button>
+          >Analyze</button>
         </div>
       </div>
 
@@ -136,54 +146,33 @@ export default function VehicleDetectionPage() {
         <div className="modern-card-header">Webcam Capture</div>
         <div className="modern-card-body">
           {!webcamActive ? (
-            <button
-              className="modern-button secondary"
-              onClick={startWebcam}
-              disabled={isLoading}
-            >
-              Start Webcam
-            </button>
+            <button className="modern-button secondary" onClick={startWebcam} disabled={isLoading}>Start Webcam</button>
           ) : (
             <>
               <video ref={videoRef} className="modern-media" muted />
               <div className="modern-button-group">
-                <button className="modern-button secondary" onClick={captureFrame} disabled={isLoading}>
-                  Capture
-                </button>
-                <button className="modern-button outline" onClick={stopWebcam} disabled={isLoading}>
-                  Stop
-                </button>
+                <button className="modern-button secondary" onClick={captureFrame} disabled={isLoading}>Capture</button>
+                <button className="modern-button outline" onClick={stopWebcam} disabled={isLoading}>Stop</button>
               </div>
             </>
           )}
-
           {capturedUrl && (
             <>
               <img src={capturedUrl} alt="Captured" className="modern-image-fixed" />
-              <button
-                className="modern-button primary"
-                onClick={submitImage}
-                disabled={isLoading}
-              >
-                Analyze Capture
-              </button>
+              <button className="modern-button primary" onClick={submitImage} disabled={isLoading}>Analyze Capture</button>
             </>
           )}
-
           <canvas ref={canvasRef} style={{ display: 'none' }} />
         </div>
       </div>
 
-      {/* Results */}
+      {/* Results + Parking UI */}
       {results.annotatedImage && (
         <div className="modern-card">
           <div className="modern-card-header">Results</div>
           <div className="modern-card-body">
-            <img
-              src={`data:image/png;base64,${results.annotatedImage}`}
-              alt="Annotated"
-              className="modern-image-fixed"
-            />
+            <img src={`data:image/png;base64,${results.annotatedImage}`} alt="Annotated" className="modern-image-fixed" />
+
             <div className="modern-row">
               <div className="modern-half">
                 <h5>Vehicles</h5>
@@ -199,7 +188,19 @@ export default function VehicleDetectionPage() {
               </div>
             </div>
 
-            {/* --- New Parking UI --- */}
+            {/* Manual Plate Input */}
+            <div className="modern-section">
+              <h5>Enter / Confirm Plate</h5>
+              <input
+                type="text"
+                className="modern-input"
+                value={plateNumber}
+                onChange={e => setPlateNumber(e.target.value.toUpperCase())}
+                placeholder="AB1234"
+              />
+            </div>
+
+            {/* Slot Parking */}
             <div className="modern-section">
               <h5>Park Detected Vehicle</h5>
               <label className="modern-label">Slot ID</label>
@@ -214,10 +215,8 @@ export default function VehicleDetectionPage() {
               <button
                 className="modern-button success"
                 onClick={handleParkSlot}
-                disabled={!results.recognizedPlates[0]}
-              >
-                Park in Slot
-              </button>
+                disabled={!plateNumber}
+              >Park in Slot</button>
               {parkingMsg && <p className="modern-text-center">{parkingMsg}</p>}
             </div>
           </div>
