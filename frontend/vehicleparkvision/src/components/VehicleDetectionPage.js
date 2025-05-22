@@ -38,13 +38,6 @@ export default function VehicleDetectionPage() {
     }
   }, [results, isVideo]);
 
-  // Auto-park if flagged
-  useEffect(() => {
-    if (results.autoParked && results.message && plateNumber && slotToPark) {
-      handleParkSlot();
-    }
-  }, [results, plateNumber, slotToPark]);
-
   // Handle file select
   const handleFileChange = e => {
     const f = e.target.files?.[0];
@@ -55,40 +48,41 @@ export default function VehicleDetectionPage() {
   };
 
   // Capture a frame at a fraction of video
-  const extractFrameFraction = (videoFile, fraction) => new Promise((resolve, reject) => {
-    const url = URL.createObjectURL(videoFile);
-    const video = document.createElement('video');
-    video.style.cssText = 'position:absolute;visibility:hidden;left:-9999px;top:0;';
-    video.preload = 'metadata';
-    video.muted = true;
-    video.src = url;
-    document.body.appendChild(video);
+  const extractFrameFraction = (videoFile, fraction) =>
+    new Promise((resolve, reject) => {
+      const url = URL.createObjectURL(videoFile);
+      const video = document.createElement('video');
+      video.style.cssText = 'position:absolute;visibility:hidden;left:-9999px;top:0;';
+      video.preload = 'metadata';
+      video.muted = true;
+      video.src = url;
+      document.body.appendChild(video);
 
-    video.addEventListener('loadedmetadata', () => {
-      const t = Math.min(fraction * video.duration, video.duration - 0.01);
-      video.currentTime = t;
-    });
+      video.addEventListener('loadedmetadata', () => {
+        const t = Math.min(fraction * video.duration, video.duration - 0.01);
+        video.currentTime = t;
+      });
 
-    video.addEventListener('seeked', () => {
-      setTimeout(() => {
-        const canvas = document.createElement('canvas');
-        canvas.width = video.videoWidth;
-        canvas.height = video.videoHeight;
-        canvas.getContext('2d').drawImage(video, 0, 0);
-        canvas.toBlob(blob => {
-          document.body.removeChild(video);
-          URL.revokeObjectURL(url);
-          blob ? resolve(blob) : reject(new Error('Failed to capture frame'));
-        }, 'image/png');
-      }, 100);
-    });
+      video.addEventListener('seeked', () => {
+        setTimeout(() => {
+          const canvas = document.createElement('canvas');
+          canvas.width = video.videoWidth;
+          canvas.height = video.videoHeight;
+          canvas.getContext('2d').drawImage(video, 0, 0);
+          canvas.toBlob(blob => {
+            document.body.removeChild(video);
+            URL.revokeObjectURL(url);
+            blob ? resolve(blob) : reject(new Error('Failed to capture frame'));
+          }, 'image/png');
+        }, 100);
+      });
 
-    video.addEventListener('error', () => {
-      document.body.removeChild(video);
-      URL.revokeObjectURL(url);
-      reject(new Error('Video load error'));
+      video.addEventListener('error', () => {
+        document.body.removeChild(video);
+        URL.revokeObjectURL(url);
+        reject(new Error('Video load error'));
+      });
     });
-  });
 
   // Compute longest common suffix among strings
   const commonSuffix = arr => {
@@ -97,11 +91,8 @@ export default function VehicleDetectionPage() {
     let suffix = '';
     for (let i = 1; i <= minLen; i++) {
       const sub = arr[0].slice(-i);
-      if (arr.every(s => s.endsWith(sub))) {
-        suffix = sub;
-      } else {
-        break;
-      }
+      if (arr.every(s => s.endsWith(sub))) suffix = sub;
+      else break;
     }
     return suffix;
   };
@@ -114,6 +105,7 @@ export default function VehicleDetectionPage() {
     }
     setLoading(true);
     try {
+      let data;
       if (isVideo) {
         const fractions = [0.1, 0.5, 0.9];
         const ocrResults = [];
@@ -123,29 +115,35 @@ export default function VehicleDetectionPage() {
           const frame = await extractFrameFraction(file, frac);
           const form = new FormData();
           form.append('file', frame, 'frame.png');
-
           const res = await fetch('http://127.0.0.1:8000/predict_ocr', {
             method: 'POST',
             body: form
           });
           if (!res.ok) throw new Error('Upload failed');
-          const data = await res.json();
-          lastResponse = data;
-          ocrResults.push(data.recognized_plates[0] || '');
+          lastResponse = await res.json();
+          ocrResults.push(lastResponse.recognized_plates[0] || '');
         }
 
-        // Get common suffix (e.g. "KY2539")
-        const stable = commonSuffix(ocrResults);
-        setPlateNumber(stable);
+        const stablePlate = commonSuffix(ocrResults);
+        setPlateNumber(stablePlate);
 
-        setResults({
+        data = {
+          ...lastResponse,
+          recognized_plates: ocrResults,
+          recognizedPlates: ocrResults,  // for setResults structure
+          suggested_slot: lastResponse.suggested_slot,
+          auto_parked: lastResponse.auto_parked,
+          message: lastResponse.message
+        };
+        setResults(prev => ({
+          ...prev,
           vehicleTypes: lastResponse.vehicle_types,
           recognizedPlates: ocrResults,
           annotatedImage: lastResponse.annotated_image,
           suggestedSlot: lastResponse.suggested_slot,
           autoParked: lastResponse.auto_parked,
           message: lastResponse.message
-        });
+        }));
       } else {
         const form = new FormData();
         form.append('file', file);
@@ -154,7 +152,7 @@ export default function VehicleDetectionPage() {
           body: form
         });
         if (!res.ok) throw new Error('Upload failed');
-        const data = await res.json();
+        data = await res.json();
         setResults({
           vehicleTypes: data.vehicle_types,
           recognizedPlates: data.recognized_plates,
@@ -165,6 +163,12 @@ export default function VehicleDetectionPage() {
         });
         setPlateNumber(data.recognized_plates[0] || '');
       }
+
+      // **IMMEDIATE ALERT** if backend says auto_parked
+      if (data.auto_parked) {
+        const msg = data.message || `Vehicle ${plateNumber} parked in slot ${data.suggested_slot}`;
+        alert(msg);
+      }
     } catch (err) {
       alert(err.message);
     } finally {
@@ -172,14 +176,13 @@ export default function VehicleDetectionPage() {
     }
   };
 
-  // Parking feedback
+  // Manual park button (still alerts + banner)
   const handleParkSlot = () => {
-    setParkingMsg(results.message || '✅ Vehicle added');
+    const msg = results.message || '✅ Vehicle added';
+    alert(msg);
+    setParkingMsg(msg);
     setShowAlert(true);
-    setTimeout(() => {
-      setShowAlert(false);
-      window.location.reload();
-    }, 3000);
+    setTimeout(() => setShowAlert(false), 3000);
   };
 
   return (
@@ -267,6 +270,7 @@ export default function VehicleDetectionPage() {
                 placeholder="e.g. 42"
                 value={slotToPark}
                 onChange={e => setSlotToPark(e.target.value)}
+
               />
               <button
                 className="modern-button success"
@@ -279,9 +283,6 @@ export default function VehicleDetectionPage() {
               {parkingMsg && showAlert && (
                 <p className="modern-text-center modern-alert-orange">{parkingMsg}</p>
               )}
-              {parkingMsg && !showAlert && (
-                <p className="modern-text-center">{parkingMsg}</p>
-              )}
             </div>
           </div>
         </div>
@@ -289,4 +290,3 @@ export default function VehicleDetectionPage() {
     </div>
   );
 }
- 

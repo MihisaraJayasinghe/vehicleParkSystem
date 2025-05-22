@@ -9,8 +9,7 @@ import {
   ActivityIndicator,
   StyleSheet,
 } from 'react-native';
-import axios from 'axios';
-import { API_BASE_URL } from '../config/api';
+import { axiosInstance } from '../config/api';
 
 export default function LoginScreen({ navigation }) {
   const [username, setUsername] = useState('');
@@ -25,17 +24,25 @@ export default function LoginScreen({ navigation }) {
     }
     setLoading(true);
     setError('');
+    console.log("Attempting login with:", username, plate); // added logging
     try {
-      const res = await axios.post(
-        `${API_BASE_URL}/login`,
+      const res = await axiosInstance.post(
+        `/login`,
         { username, vehicle_plate: plate }
       );
+      console.log("Login response:", res); // log response
       if (res.status === 200) {
         navigation.replace('Home');
       } else {
         setError('Login failed');
       }
     } catch (e) {
+      console.error("Login error:", e); // log error to console
+      // Added detailed logging of error response
+      if (e.response) {
+        console.error("Status:", e.response.status);
+        console.error("Response data:", e.response.data);
+      }
       setError(e.response?.data?.detail || 'Login error');
     } finally {
       setLoading(false);

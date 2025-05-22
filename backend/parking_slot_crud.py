@@ -3,18 +3,28 @@ import os
 from datetime import datetime
 from pymongo import MongoClient
 from dotenv import load_dotenv
+import logging
 
 load_dotenv()
 MONGO_URI = os.getenv("MONGO_URI")
 if not MONGO_URI:
     raise RuntimeError("MONGO_URI not set in .env")
 
-client = MongoClient(MONGO_URI)
+try:
+    client = MongoClient(MONGO_URI)
+except Exception as e:
+    logging.error("Failed to connect to MongoDB with MONGO_URI=%s: %s", MONGO_URI, e)
+    raise
+
 db = client.get_default_database()
 slots = db.parking_slots
 
 # unique index
-slots.create_index("slot_id", unique=True)
+try:
+    slots.create_index("slot_id", unique=True)
+except Exception as e:
+    import logging
+    logging.error("Failed to create index for slots: %s", e)
 
 def init_slots(count: int = 100):
     """Seed slots 1-count as free (only if collection empty)."""
