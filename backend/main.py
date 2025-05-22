@@ -6,10 +6,8 @@ from datetime import datetime
 import torch
 from torch.autograd import Variable
 from PIL import Image
-import torchvision.transforms as transforms
 import pytesseract
 import re
-import tempfile  # added for handling temporary files
 
 from fastapi import FastAPI, File, UploadFile, HTTPException, Query
 from fastapi.middleware.cors import CORSMiddleware
@@ -144,49 +142,52 @@ def api_parked_employees():
 @app.post("/predict_ocr")
 async def predict_ocr(file: UploadFile = File(...)):
     """
-    Detect vehicles & number-plates. If a video file is uploaded, capture a screenshot
-    and process it for OCR. Then, auto-park if slot is booked.
+    Detect vehicles & number-plates, OCR the plate using Tesseract with improved accuracy,
+    filter out small components (e.g. tiny 'WP'), and auto-park if slot is booked.
     """
     try:
-        # 1) Determine if the file is an image or video
-        if file.content_type.startswith("video"):
-            # Save uploaded video to a temporary file
-            with tempfile.NamedTemporaryFile(suffix=".mp4", delete=False) as temp_video:
-                temp_video.write(await file.read())
-                temp_video_path = temp_video.name
-            # Use OpenCV to capture the first frame
-            cap = cv2.VideoCapture(temp_video_path)
-            ret, frame = cap.read()
-            cap.release()
-            if not ret:
-                raise HTTPException(400, "Could not extract frame from video")
-            img = frame  # Use extracted frame as the image for subsequent processing
-        else:
-            # Process as image file
-            img_bytes = await file.read()
-            img = cv2.imdecode(np.frombuffer(img_bytes, np.uint8), cv2.IMREAD_COLOR)
-            if img is None:
-                raise HTTPException(400, "Bad image")
+        # 1) Read & decode image
+        img_bytes = await file.read()
+        img = cv2.imdecode(np.frombuffer(img_bytes, np.uint8), cv2.IMREAD_COLOR)
+        if img is None:
+            raise HTTPException(400, "Bad image")
 
-        # 2) Run YOLO with higher confidence
+        # 2) Run YOLO with higher confidence threshold
         det = model.predict(img, conf=0.65, verbose=False)[0]
         annotated = det.plot()
+
         vehicles, plates = [], []
         for box in det.boxes:
             cls_id = int(box.cls[0])
             label = class_names.get(cls_id, "unknown")
             x1, y1, x2, y2 = map(int, box.xyxy[0])
+
             if label == "number plate":
+                # Crop the number plate region
                 crop = img[y1:y2, x1:x2]
-                # Enhanced preprocessing for OCR
-                gray = cv2.cvtColor(crop, cv2.COLOR_BGR2GRAY)
+
+                # === Enhanced preprocessing & component filtering ===
+                gray    = cv2.cvtColor(crop, cv2.COLOR_BGR2GRAY)
                 resized = cv2.resize(gray, None, fx=3, fy=3, interpolation=cv2.INTER_CUBIC)
-                blur = cv2.bilateralFilter(resized, 11, 30, 30)
-                _, thresh = cv2.threshold(blur, 0, 255,
-                                          cv2.THRESH_BINARY + cv2.THRESH_OTSU)
+                blur    = cv2.bilateralFilter(resized, 11, 30, 30)
+                _, thresh = cv2.threshold(blur, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
                 kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (3,3))
                 morphed = cv2.morphologyEx(thresh, cv2.MORPH_CLOSE, kernel)
-                crop_pil = Image.fromarray(morphed)
+
+                # Connected components to drop small blobs
+                num_labels, labels, stats, _ = cv2.connectedComponentsWithStats(morphed, connectivity=8)
+                heights = stats[1:, cv2.CC_STAT_HEIGHT] if num_labels>1 else np.array([])
+                max_h   = heights.max() if heights.size else 0
+                min_h   = max_h * 0.5  # threshold (50% of tallest)
+
+                mask = np.zeros_like(morphed)
+                for i, stat in enumerate(stats[1:], start=1):
+                    if stat[cv2.CC_STAT_HEIGHT] >= min_h:
+                        mask[labels == i] = 255
+                mask = cv2.dilate(mask, cv2.getStructuringElement(cv2.MORPH_RECT, (2,2)), iterations=1)
+
+                # OCR only the large components
+                crop_pil = Image.fromarray(mask)
                 plate_text = pytesseract.image_to_string(
                     crop_pil,
                     config='--psm 8 --oem 1 -c tessedit_char_whitelist=0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZ'
@@ -198,6 +199,8 @@ async def predict_ocr(file: UploadFile = File(...)):
                     ).strip()
                 plate_text = re.sub(r'[^A-Z0-9]', '', plate_text)
                 plates.append(plate_text)
+
+                # Annotate
                 cv2.putText(annotated, plate_text, (x1, max(y1-10, 0)),
                             cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0,255,255), 2)
             else:
@@ -207,8 +210,8 @@ async def predict_ocr(file: UploadFile = File(...)):
 
         # 3) Auto-park if booked
         suggested_slot = None
-        auto_parked = False
-        message = None
+        auto_parked   = False
+        message       = None
         if plates:
             plate0 = plates[0]
             slot_doc = slots_collection.find_one(
@@ -218,25 +221,25 @@ async def predict_ocr(file: UploadFile = File(...)):
             if slot_doc:
                 suggested_slot = slot_doc["slot_id"]
                 try:
-                    updated = park_slot(suggested_slot, plate0)
+                    park_slot(suggested_slot, plate0)
                     auto_parked = True
-                    message = f"Vehicle successfully added to database in slot {suggested_slot}"
+                    message = f"Vehicle parked in slot {suggested_slot}"
                 except ValueError as e:
-                    logger.error(f"Failed to park slot: {e}")
+                    logger.error(f"Park error: {e}")
                     message = str(e)
 
-        # 4) Encode annotated image
+        # 4) Return base64 PNG
         ok, png = cv2.imencode(".png", annotated)
         if not ok:
             raise RuntimeError("encode-fail")
 
         return {
-            "vehicle_types": vehicles if vehicles else [],
-            "recognized_plates": plates if plates else [],
-            "annotated_image": base64.b64encode(png).decode() if png is not None else None,
-            "suggested_slot": suggested_slot,
-            "auto_parked": auto_parked,
-            "message": message
+            "vehicle_types":     vehicles,
+            "recognized_plates": plates,
+            "annotated_image":   base64.b64encode(png).decode(),
+            "suggested_slot":    suggested_slot,
+            "auto_parked":       auto_parked,
+            "message":           message
         }
 
     except Exception as e:

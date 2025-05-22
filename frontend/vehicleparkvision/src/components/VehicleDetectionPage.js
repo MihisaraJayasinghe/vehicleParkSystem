@@ -1,4 +1,4 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useRef } from 'react';
 import { Link } from 'react-router-dom';
 import './ModernStyles.css';
 
@@ -13,8 +13,11 @@ export default function VehicleDetectionPage() {
     message: null
   });
 
-  // --- File to send for OCR ---
+  // --- File & preview state ---
   const [file, setFile] = useState(null);
+  const [previewUrl, setPreviewUrl] = useState(null);
+  const [isVideo, setIsVideo] = useState(false);
+  const videoRef = useRef(null);
 
   // --- Parking UI state ---
   const [plateNumber, setPlateNumber] = useState('');
@@ -25,44 +28,143 @@ export default function VehicleDetectionPage() {
   // --- Loading spinner ---
   const [loading, setLoading] = useState(false);
 
-  // Auto-fill plate and slot
+  // Auto-fill only for images (not videos)
   useEffect(() => {
-    if (results.recognizedPlates.length > 0) {
+    if (!isVideo && results.recognizedPlates.length) {
       setPlateNumber(results.recognizedPlates[0]);
     }
-    if (results.suggestedSlot !== null && results.suggestedSlot !== undefined) {
+    if (results.suggestedSlot != null) {
       setSlotToPark(String(results.suggestedSlot));
     }
-  }, [results]);
+  }, [results, isVideo]);
 
-  // Trigger parking when both plateNumber and slotToPark are set, and autoParked is true
+  // Auto-park if flagged
   useEffect(() => {
     if (results.autoParked && results.message && plateNumber && slotToPark) {
       handleParkSlot();
     }
   }, [results, plateNumber, slotToPark]);
 
-  // Send image → /predict_ocr
+  // Handle file select
+  const handleFileChange = e => {
+    const f = e.target.files?.[0];
+    if (!f) return;
+    setFile(f);
+    setIsVideo(f.type.startsWith('video/'));
+    setPreviewUrl(URL.createObjectURL(f));
+  };
+
+  // Capture a frame at a fraction of video
+  const extractFrameFraction = (videoFile, fraction) => new Promise((resolve, reject) => {
+    const url = URL.createObjectURL(videoFile);
+    const video = document.createElement('video');
+    video.style.cssText = 'position:absolute;visibility:hidden;left:-9999px;top:0;';
+    video.preload = 'metadata';
+    video.muted = true;
+    video.src = url;
+    document.body.appendChild(video);
+
+    video.addEventListener('loadedmetadata', () => {
+      const t = Math.min(fraction * video.duration, video.duration - 0.01);
+      video.currentTime = t;
+    });
+
+    video.addEventListener('seeked', () => {
+      setTimeout(() => {
+        const canvas = document.createElement('canvas');
+        canvas.width = video.videoWidth;
+        canvas.height = video.videoHeight;
+        canvas.getContext('2d').drawImage(video, 0, 0);
+        canvas.toBlob(blob => {
+          document.body.removeChild(video);
+          URL.revokeObjectURL(url);
+          blob ? resolve(blob) : reject(new Error('Failed to capture frame'));
+        }, 'image/png');
+      }, 100);
+    });
+
+    video.addEventListener('error', () => {
+      document.body.removeChild(video);
+      URL.revokeObjectURL(url);
+      reject(new Error('Video load error'));
+    });
+  });
+
+  // Compute longest common suffix among strings
+  const commonSuffix = arr => {
+    if (!arr.length) return '';
+    const minLen = Math.min(...arr.map(s => s.length));
+    let suffix = '';
+    for (let i = 1; i <= minLen; i++) {
+      const sub = arr[0].slice(-i);
+      if (arr.every(s => s.endsWith(sub))) {
+        suffix = sub;
+      } else {
+        break;
+      }
+    }
+    return suffix;
+  };
+
+  // Submit image or multiple frames
   const submitImage = async () => {
-    if (!file) return alert('Select an image first');
+    if (!file) {
+      alert('Select a file first');
+      return;
+    }
     setLoading(true);
     try {
-      const form = new FormData();
-      form.append('file', file);
-      const res = await fetch('http://127.0.0.1:8000/predict_ocr', {
-        method: 'POST',
-        body: form
-      });
-      if (!res.ok) throw new Error('Upload failed');
-      const data = await res.json();
-      setResults({
-        vehicleTypes:     data.vehicle_types,
-        recognizedPlates: data.recognized_plates,
-        annotatedImage:   data.annotated_image,
-        suggestedSlot:    data.suggested_slot,
-        autoParked:       data.auto_parked,
-        message:          data.message
-      });
+      if (isVideo) {
+        const fractions = [0.1, 0.5, 0.9];
+        const ocrResults = [];
+        let lastResponse = null;
+
+        for (const frac of fractions) {
+          const frame = await extractFrameFraction(file, frac);
+          const form = new FormData();
+          form.append('file', frame, 'frame.png');
+
+          const res = await fetch('http://127.0.0.1:8000/predict_ocr', {
+            method: 'POST',
+            body: form
+          });
+          if (!res.ok) throw new Error('Upload failed');
+          const data = await res.json();
+          lastResponse = data;
+          ocrResults.push(data.recognized_plates[0] || '');
+        }
+
+        // Get common suffix (e.g. "KY2539")
+        const stable = commonSuffix(ocrResults);
+        setPlateNumber(stable);
+
+        setResults({
+          vehicleTypes: lastResponse.vehicle_types,
+          recognizedPlates: ocrResults,
+          annotatedImage: lastResponse.annotated_image,
+          suggestedSlot: lastResponse.suggested_slot,
+          autoParked: lastResponse.auto_parked,
+          message: lastResponse.message
+        });
+      } else {
+        const form = new FormData();
+        form.append('file', file);
+        const res = await fetch('http://127.0.0.1:8000/predict_ocr', {
+          method: 'POST',
+          body: form
+        });
+        if (!res.ok) throw new Error('Upload failed');
+        const data = await res.json();
+        setResults({
+          vehicleTypes: data.vehicle_types,
+          recognizedPlates: data.recognized_plates,
+          annotatedImage: data.annotated_image,
+          suggestedSlot: data.suggested_slot,
+          autoParked: data.auto_parked,
+          message: data.message
+        });
+        setPlateNumber(data.recognized_plates[0] || '');
+      }
     } catch (err) {
       alert(err.message);
     } finally {
@@ -70,13 +172,13 @@ export default function VehicleDetectionPage() {
     }
   };
 
-  // Handle parking UI feedback (no API call since backend already parked)
+  // Parking feedback
   const handleParkSlot = () => {
-    setParkingMsg(results.message || '✅ Vehicle successfully added to database');
+    setParkingMsg(results.message || '✅ Vehicle added');
     setShowAlert(true);
     setTimeout(() => {
       setShowAlert(false);
-      window.location.reload(); // Auto-refresh after 3 seconds
+      window.location.reload();
     }, 3000);
   };
 
@@ -88,19 +190,26 @@ export default function VehicleDetectionPage() {
         </div>
       )}
 
-      <Link to="/" className="modern-back-button">← Home</Link>
+      <Link to="/" className="modern-back-button">Back</Link>
       <h2 className="modern-title">Vehicle & Plate Detection</h2>
 
-      {/* — Image Upload — */}
+      {/* File Upload & Preview */}
       <div className="modern-card">
-        <div className="modern-card-header">Upload Image</div>
+        <div className="modern-card-header">Upload Image or Video</div>
         <div className="modern-card-body">
           <input
             type="file"
-            accept="image/*"
-            onChange={e => setFile(e.target.files[0])}
+            accept="image/*,video/*"
+            onChange={handleFileChange}
             className="modern-input-file"
           />
+
+          {previewUrl && isVideo ? (
+            <video ref={videoRef} src={previewUrl} controls className="modern-video-preview" />
+          ) : previewUrl ? (
+            <img src={previewUrl} alt="preview" className="modern-image-fixed" />
+          ) : null}
+
           <button
             className="modern-button primary"
             onClick={submitImage}
@@ -111,7 +220,7 @@ export default function VehicleDetectionPage() {
         </div>
       </div>
 
-      {/* — OCR Results & Parking UI — */}
+      {/* OCR Results & Parking */}
       {results.annotatedImage && (
         <div className="modern-card">
           <div className="modern-card-header">Results</div>
@@ -126,18 +235,17 @@ export default function VehicleDetectionPage() {
               <div className="modern-half">
                 <h5>Vehicles</h5>
                 <ul className="modern-list">
-                  {results.vehicleTypes.map((v,i) => <li key={i}>{v}</li>)}
+                  {results.vehicleTypes.map((v, i) => <li key={i}>{v}</li>)}
                 </ul>
               </div>
               <div className="modern-half">
                 <h5>Plates</h5>
                 <ul className="modern-list">
-                  {results.recognizedPlates.map((p,i) => <li key={i}>{p}</li>)}
+                  {results.recognizedPlates.map((p, i) => <li key={i}>{p}</li>)}
                 </ul>
               </div>
             </div>
 
-            {/* — Confirm / Edit Plate — */}
             <div className="modern-section">
               <h5>Enter / Confirm Plate</h5>
               <input
@@ -149,7 +257,6 @@ export default function VehicleDetectionPage() {
               />
             </div>
 
-            {/* — Park Slot — */}
             <div className="modern-section">
               <h5>Park Vehicle</h5>
               <label className="modern-label">Slot ID</label>
@@ -168,6 +275,7 @@ export default function VehicleDetectionPage() {
               >
                 Park in Slot
               </button>
+
               {parkingMsg && showAlert && (
                 <p className="modern-text-center modern-alert-orange">{parkingMsg}</p>
               )}
@@ -181,3 +289,4 @@ export default function VehicleDetectionPage() {
     </div>
   );
 }
+ 
