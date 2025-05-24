@@ -9,11 +9,13 @@ from PIL import Image
 import pytesseract
 import re
 
-from fastapi import FastAPI, File, UploadFile, HTTPException, Query
+from fastapi import FastAPI, File, UploadFile, HTTPException, Query, Path
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 from fastapi.encoders import jsonable_encoder
 from pydantic import BaseModel
+from fastapi.exceptions import RequestValidationError
+from starlette.responses import PlainTextResponse
 
 import uvicorn
 from ultralytics import YOLO
@@ -30,7 +32,7 @@ from parking_slot_crud import (
     slots as slots_collection
 )
 from employee_vehicle_model import init_employee_table, get_all_employee_plates
-from user_auth_mongo import register_user, login_user
+from user_auth_mongo import register_user, login_user, users
 
 # Logging setup
 logging.basicConfig(level=logging.INFO)
@@ -41,7 +43,7 @@ app = FastAPI()
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
-    allow_origin_regex=".*",  # allow all origins via regex
+    allow_origin_regex=".*",
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -67,12 +69,26 @@ class UserAuth(BaseModel):
     username: str
     vehicle_plate: str
 
+# Add allowed ranges mapping
+ALLOWED_RANGES = {
+    "Bikes": (1, 40),
+    "Cars": (41, 70),
+    "ThreeWheelers": (71, 80),
+    "Vans": (81, 90),
+    "Trucks": (91, 95),
+    "Lorries": (96, 100)
+}
+
+# Update the SlotAction schema to include vehicle_type
 class SlotAction(BaseModel):
     slot_id: int
     vehicle_plate: str
+    username: str
+    vehicle_type: str  # new field indicating the type of vehicle
 
 class ClearAction(BaseModel):
     slot_id: int
+    username: str           # provided by client
     rate_per_hour: float = 10.0
 
 # Auth endpoints
@@ -101,6 +117,14 @@ def api_init_slots(count: int = Query(100, ge=1, le=1000)):
 # Slot CRUD endpoints
 @app.post("/slots/book")
 def api_book_slot(action: SlotAction):
+    # Check allowed range based on vehicle_type
+    if action.vehicle_type not in ALLOWED_RANGES:
+        raise HTTPException(status_code=400,
+                            detail="Invalid vehicle type provided.")
+    low, high = ALLOWED_RANGES[action.vehicle_type]
+    if not (low <= action.slot_id <= high):
+        raise HTTPException(status_code=400,
+            detail=f"Slot {action.slot_id} is not available for {action.vehicle_type}. Allowed slots are {low}-{high}.")
     try:
         updated = book_slot(action.slot_id, action.vehicle_plate)
         updated.pop("_id", None)
@@ -125,7 +149,13 @@ def api_list_slots():
 @app.post("/slots/clear")
 def api_clear_slot(action: ClearAction):
     try:
-        info = clear_slot(action.slot_id, action.rate_per_hour)
+        # Retrieve user data from the users collection
+        user = users.find_one({"username": action.username})
+        if not user:
+            raise ValueError("User not found")
+        # Get user's vehicle plate from DB
+        user_plate = str(user["vehicle_plate"]).strip().upper()
+        info = clear_slot(action.slot_id, user_plate, action.rate_per_hour)
         return JSONResponse(jsonable_encoder(info))
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
@@ -142,18 +172,12 @@ def api_parked_employees():
 # ML OCR endpoint
 @app.post("/predict_ocr")
 async def predict_ocr(file: UploadFile = File(...)):
-    """
-    Detect vehicles & number-plates, OCR the plate using Tesseract with improved accuracy,
-    filter out small components (e.g. tiny 'WP'), and auto-park if slot is booked.
-    """
     try:
-        # 1) Read & decode image
         img_bytes = await file.read()
         img = cv2.imdecode(np.frombuffer(img_bytes, np.uint8), cv2.IMREAD_COLOR)
         if img is None:
             raise HTTPException(400, "Bad image")
 
-        # 2) Run YOLO with higher confidence threshold
         det = model.predict(img, conf=0.65, verbose=False)[0]
         annotated = det.plot()
 
@@ -164,10 +188,7 @@ async def predict_ocr(file: UploadFile = File(...)):
             x1, y1, x2, y2 = map(int, box.xyxy[0])
 
             if label == "number plate":
-                # Crop the number plate region
                 crop = img[y1:y2, x1:x2]
-
-                # === Enhanced preprocessing & component filtering ===
                 gray    = cv2.cvtColor(crop, cv2.COLOR_BGR2GRAY)
                 resized = cv2.resize(gray, None, fx=3, fy=3, interpolation=cv2.INTER_CUBIC)
                 blur    = cv2.bilateralFilter(resized, 11, 30, 30)
@@ -175,11 +196,10 @@ async def predict_ocr(file: UploadFile = File(...)):
                 kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (3,3))
                 morphed = cv2.morphologyEx(thresh, cv2.MORPH_CLOSE, kernel)
 
-                # Connected components to drop small blobs
                 num_labels, labels, stats, _ = cv2.connectedComponentsWithStats(morphed, connectivity=8)
                 heights = stats[1:, cv2.CC_STAT_HEIGHT] if num_labels>1 else np.array([])
                 max_h   = heights.max() if heights.size else 0
-                min_h   = max_h * 0.5  # threshold (50% of tallest)
+                min_h   = max_h * 0.5
 
                 mask = np.zeros_like(morphed)
                 for i, stat in enumerate(stats[1:], start=1):
@@ -187,7 +207,6 @@ async def predict_ocr(file: UploadFile = File(...)):
                         mask[labels == i] = 255
                 mask = cv2.dilate(mask, cv2.getStructuringElement(cv2.MORPH_RECT, (2,2)), iterations=1)
 
-                # OCR only the large components
                 crop_pil = Image.fromarray(mask)
                 plate_text = pytesseract.image_to_string(
                     crop_pil,
@@ -201,7 +220,6 @@ async def predict_ocr(file: UploadFile = File(...)):
                 plate_text = re.sub(r'[^A-Z0-9]', '', plate_text)
                 plates.append(plate_text)
 
-                # Annotate
                 cv2.putText(annotated, plate_text, (x1, max(y1-10, 0)),
                             cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0,255,255), 2)
             else:
@@ -209,7 +227,6 @@ async def predict_ocr(file: UploadFile = File(...)):
                 cv2.putText(annotated, label, (x1, max(y1-10, 0)),
                             cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0,255,0), 2)
 
-        # 3) Auto-park if booked
         suggested_slot = None
         auto_parked   = False
         message       = None
@@ -229,7 +246,6 @@ async def predict_ocr(file: UploadFile = File(...)):
                     logger.error(f"Park error: {e}")
                     message = str(e)
 
-        # 4) Return base64 PNG
         ok, png = cv2.imencode(".png", annotated)
         if not ok:
             raise RuntimeError("encode-fail")
@@ -257,6 +273,12 @@ async def detect_slots(file: UploadFile = File(...)):
         logger.error(f"/detect_slots error: {e}")
         raise HTTPException(status_code=500, detail=str(e))
 
-# Run the app
+@app.get("/users/{username}")
+def get_user(username: str = Path(..., description="The username to lookup")):
+    user = users.find_one({"username": username}, {"_id": 0})
+    if not user:
+        raise HTTPException(status_code=404, detail="User not found")
+    return user
+
 if __name__ == "__main__":
     uvicorn.run(app, host="0.0.0.0", port=8000)

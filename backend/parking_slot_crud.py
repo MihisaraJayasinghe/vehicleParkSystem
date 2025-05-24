@@ -1,4 +1,3 @@
-# parking_slot_crud_mongo.py
 import os
 from datetime import datetime
 from pymongo import MongoClient
@@ -19,11 +18,9 @@ except Exception as e:
 db = client.get_default_database()
 slots = db.parking_slots
 
-# unique index
 try:
     slots.create_index("slot_id", unique=True)
 except Exception as e:
-    import logging
     logging.error("Failed to create index for slots: %s", e)
 
 def init_slots(count: int = 100):
@@ -37,6 +34,9 @@ def init_slots(count: int = 100):
         slots.insert_many(docs)
 
 def book_slot(slot_id: int, plate: str) -> dict:
+    plate = plate.strip().upper()
+    if slots.find_one({"parked_vehicle_plate": plate, "status": "booked"}):
+        _err(f"User with plate {plate} already has a booked slot")
     return slots.find_one_and_update(
         {"slot_id": slot_id, "status": "free"},
         {"$set": {"status": "booked", "parked_vehicle_plate": plate}},
@@ -44,6 +44,7 @@ def book_slot(slot_id: int, plate: str) -> dict:
     ) or _err(f"Slot {slot_id} not free")
 
 def park_slot(slot_id: int, plate: str) -> dict:
+    plate = plate.strip().upper()
     now = datetime.utcnow()
     return slots.find_one_and_update(
         {"slot_id": slot_id, "status": "booked",
@@ -55,15 +56,19 @@ def park_slot(slot_id: int, plate: str) -> dict:
 def get_all_slots() -> list:
     return list(slots.find({}, {"_id": 0}))
 
-def clear_slot(slot_id: int, rate: float = 10.0) -> dict:
+def clear_slot(slot_id: int, vehicle_plate: str, rate: float = 10.0) -> dict:
+    # Normalize input vehicle_plate
+    vehicle_plate = str(vehicle_plate).strip().upper()
     doc = slots.find_one({"slot_id": slot_id})
     if not doc or doc["status"] != "parked" or not doc["parked_time"]:
         _err(f"Slot {slot_id} not parked")
-
+    stored_plate = str(doc["parked_vehicle_plate"]).strip().upper()
+    # Ensure the provided plate matches the parked plate
+    if stored_plate != vehicle_plate:
+        _err(f"Unauthorized: Slot {slot_id} is parked by {stored_plate}")
     start, end = doc["parked_time"], datetime.utcnow()
     hours = (end - start).total_seconds() / 3600
     fee = round(hours * rate, 2)
-
     slots.update_one(
         {"slot_id": slot_id},
         {"$set": {"status": "free",

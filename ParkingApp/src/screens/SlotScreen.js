@@ -12,11 +12,13 @@ import {
 } from 'react-native';
 import axios from 'axios';
 import { API_BASE_URL } from '../config/api';
+import AsyncStorage from '@react-native-async-storage/async-storage';
 
 export default function SlotScreen({ navigation }) {
   const [slots, setSlots] = useState([]);
   const [loading, setLoading] = useState(true);
   const [refreshing, setRefreshing] = useState(false);
+  const [loggedPlate, setLoggedPlate] = useState('');
 
   const fetchSlots = useCallback(async () => {
     try {
@@ -34,6 +36,19 @@ export default function SlotScreen({ navigation }) {
     fetchSlots();
   }, [fetchSlots]);
 
+  useEffect(() => {
+    AsyncStorage.getItem('user').then(userJson => {
+      if (userJson) {
+        const user = JSON.parse(userJson);
+        setLoggedPlate(user.vehicle_plate);
+      }
+    });
+  }, []);
+
+  const userHasBooked = slots.some(
+    s => s.parked_vehicle_plate === loggedPlate && s.status === 'booked'
+  );
+
   const getSlotColor = status => {
     if (status === 'booked') return '#FFC107';
     if (status === 'parked') return '#F44336';
@@ -43,12 +58,45 @@ export default function SlotScreen({ navigation }) {
   const renderSlot = ({ item }) => (
     <TouchableOpacity
       style={[styles.slot, { backgroundColor: getSlotColor(item.status) }]}
-      onPress={() => {
-        const screen = item.status === 'free' ? 'Book' : 'Remove';
-        navigation.navigate(screen, { slotId: item.slot_id });
+      onPress={async () => {
+        try {
+          const userJson = await AsyncStorage.getItem('user');
+          console.log("Retrieved user data in SlotScreen:", userJson); // Debug log
+          
+          if (!userJson) {
+            alert('Please log in first');
+            return;
+          }
+
+          const userData = JSON.parse(userJson);
+          console.log("Parsed user data:", userData); // Debug log
+
+          if (item.status === 'free') {
+            if (userHasBooked) {
+              alert('You already have a booked slot');
+            } else {
+              navigation.navigate('Book', { slotId: item.slot_id });
+            }
+          } else {
+            // Clear/Remove slot case
+            if (item.status === 'parked' && item.parked_vehicle_plate !== userData.vehicle_plate) {
+              alert('You can only clear slots parked by your vehicle');
+              return;
+            }
+
+            navigation.navigate('Remove', {
+              slotId: item.slot_id,
+              username: userData.username,
+              vehicle_plate: userData.vehicle_plate.toUpperCase() // Ensure uppercase
+            });
+          }
+        } catch (error) {
+          console.error("Error in slot press handler:", error);
+          alert('Error accessing user data');
+        }
       }}
     >
-      <Text style={styles.slotId}>#{item.slot_id}</Text>
+      <Text style={styles.slotId}> djfdjfdjfdf#{item.slot_id}</Text>
       <Text style={styles.slotStatus}>{item.status.toUpperCase()}</Text>
       {item.parked_vehicle_plate && (
         <Text style={styles.slotPlate}>{item.parked_vehicle_plate}</Text>

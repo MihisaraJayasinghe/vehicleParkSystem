@@ -1,106 +1,95 @@
 import React, { useState, useEffect } from 'react';
-import { Table, Button, Form } from 'react-bootstrap';
+import { Table, Form, Spinner, Badge } from 'react-bootstrap';
 import Swal from 'sweetalert2';
 
 function ParkManagement() {
-  const [vehicles, setVehicles] = useState([]);
+  const [slots, setSlots] = useState([]);
   const [searchPlate, setSearchPlate] = useState('');
+  const [isLoading, setIsLoading] = useState(true);
 
   useEffect(() => {
-    fetchVehicles();
+    fetchSlots();
   }, []);
 
-  const fetchVehicles = async () => {
+  const fetchSlots = async () => {
+    setIsLoading(true);
     try {
-      const res = await fetch('http://127.0.0.1:8000/get_parked_vehicles');
+      // GET /slots returns an array directly—not under key "vehicles"
+      const res = await fetch('http://127.0.0.1:8000/slots');
       const data = await res.json();
-      setVehicles(data.vehicles);
+      // Filter for only parked slots (adjust condition if you want to include booked as well)
+      const parkedSlots = data.filter(slot => slot.status === 'parked');
+      setSlots(parkedSlots);
     } catch (error) {
-      console.error('Error fetching vehicles:', error);
+      console.error('Error fetching slots:', error);
+      Swal.fire('Error', 'Failed to fetch parked vehicles', 'error');
+    } finally {
+      setIsLoading(false);
     }
   };
 
-  const handleRemoveVehicle = async (licensePlate) => {
-    const result = await Swal.fire({
-      title: 'Remove Vehicle?',
-      text: `Are you sure you want to remove vehicle ${licensePlate}?`,
-      icon: 'warning',
-      showCancelButton: true,
-      confirmButtonText: 'Yes, remove it!'
-    });
-  
-    if (result.isConfirmed) {
-      try {
-        const res = await fetch('http://127.0.0.1:8000/remove_vehicle', {
-          method: 'POST', // Changed back to POST
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ license_plate: licensePlate })
-        });
-  
-        const data = await res.json();
-        if (res.ok) {
-          await Swal.fire('Vehicle Removed', data.message || 'The vehicle has been removed successfully.', 'success');
-          fetchVehicles(); // Refresh the list
-        } else {
-          Swal.fire('Error', data.error || 'Failed to remove vehicle', 'error');
-        }
-      } catch (error) {
-        Swal.fire('Error', 'Failed to remove vehicle', 'error');
-      }
-    }
-  };
+  // Case-insensitive search on parked_vehicle_plate
+  const filteredSlots = slots.filter(slot =>
+    slot.parked_vehicle_plate?.toString().toLowerCase().includes(searchPlate.toLowerCase())
+  );
+
   return (
     <div className="container mt-4">
-      <h2>Parking Management</h2>
-      
+      <h2>Parked Vehicles</h2>
+
       <Form className="mb-4">
-        <Form.Group>
-          <Form.Control
-            type="text"
-            placeholder="Search by license plate"
-            value={searchPlate}
-            onChange={(e) => setSearchPlate(e.target.value)}
-          />
-        </Form.Group>
+        <Form.Control
+          type="text"
+          placeholder="Search by license plate"
+          value={searchPlate}
+          onChange={(e) => setSearchPlate(e.target.value)}
+        />
       </Form>
- 
-      <div className="table-responsive">
-        <Table striped bordered hover>
-          <thead>
-            <tr>
-              <th>License Plate</th>
-              <th>Vehicle Type</th>
-              <th>Parking Status</th>
-              <th>Time In</th>
-              <th>Actions</th>
-            </tr>
-          </thead>
-          <tbody>
-            {Array.isArray(vehicles) && vehicles
-              .filter(v => v.license_plate?.toString().includes(searchPlate))
-              .map(vehicle => (
-                <tr key={vehicle.id}>
-                  <td>{vehicle.license_plate}</td>
-                  <td>{vehicle.vehicle_type}</td>
-                  <td>
-                    <span className={`badge bg-${vehicle.parking_state === 'parked' ? 'success' : 'warning'}`}>
-                      {vehicle.parking_state || 'Booked'}
-                    </span>
-                  </td>
-                  <td>{new Date(vehicle.time_in).toLocaleString()}</td>
-                  <td>
-                    <Button
-                      variant="danger"
-                      onClick={() => handleRemoveVehicle(vehicle.license_plate)}
-                    >
-                      Remove
-                    </Button>
+
+      {isLoading ? (
+        <div className="text-center">
+          <Spinner animation="border" role="status">
+            <span className="visually-hidden">Loading...</span>
+          </Spinner>
+        </div>
+      ) : (
+        <div className="table-responsive">
+          <Table striped bordered hover>
+            <thead>
+              <tr>
+                <th>Slot ID</th>
+                <th>Status</th>
+                <th>Vehicle Plate</th>
+                <th>Time In</th>
+              </tr>
+            </thead>
+            <tbody>
+              {filteredSlots.length ? (
+                filteredSlots.map(slot => (
+                  <tr key={slot.slot_id}>
+                    <td>{slot.slot_id}</td>
+                    <td>
+                      <Badge bg="success">
+                        {slot.status.toUpperCase()}
+                      </Badge>
+                    </td>
+                    <td>{slot.parked_vehicle_plate || 'N/A'}</td>
+                    <td>
+                      {slot.parked_time ? new Date(slot.parked_time).toLocaleString() : 'N/A'}
+                    </td>
+                  </tr>
+                ))
+              ) : (
+                <tr>
+                  <td colSpan="4" className="text-center">
+                    No parked vehicles found.
                   </td>
                 </tr>
-            ))}
-          </tbody>
-        </Table>
-      </div>
+              )}
+            </tbody>
+          </Table>
+        </div>
+      )}
     </div>
   );
 }

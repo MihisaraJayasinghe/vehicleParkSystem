@@ -21,18 +21,16 @@ if "email_1" in existing:
 # Ensure unique index on username only
 users.create_index("username", unique=True)
 
-def register_user(username: str, vehicle_plate: str) -> dict:
+def register_user(username: str, vehicle_plate: str, vehicle_type: str) -> dict:
     if users.find_one({"username": username}):
         raise ValueError(f"Username '{username}' is already taken")
     doc = {
         "username": username,
-        "vehicle_plate": vehicle_plate
-      
+        "vehicle_plate": vehicle_plate,
+        "vehicle_type": vehicle_type
     }
     users.insert_one(doc)
     return doc
-
-# … rest of your login_user, etc. …
 
 def login_user(username: str, vehicle_plate: str) -> dict:
     """

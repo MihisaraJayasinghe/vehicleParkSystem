@@ -10,6 +10,7 @@ import {
   StyleSheet,
 } from 'react-native';
 import { axiosInstance } from '../config/api';
+import AsyncStorage from '@react-native-async-storage/async-storage'; // new import
 
 export default function LoginScreen({ navigation }) {
   const [username, setUsername] = useState('');
@@ -30,12 +31,12 @@ export default function LoginScreen({ navigation }) {
         `/login`,
         { username, vehicle_plate: plate }
       );
-      console.log("Login response:", res); // log response
-      if (res.status === 200) {
-        navigation.replace('Home');
-      } else {
-        setError('Login failed');
-      }
+      console.log("Login successful, storing user data:", res.data.user);
+      await AsyncStorage.setItem('user', JSON.stringify(res.data.user));
+      // Verify storage
+      const stored = await AsyncStorage.getItem('user');
+      console.log("Verified stored user data:", stored);
+      navigation.replace('Home');
     } catch (e) {
       console.error("Login error:", e); // log error to console
       // Added detailed logging of error response
@@ -78,7 +79,7 @@ export default function LoginScreen({ navigation }) {
       >
         {loading
           ? <ActivityIndicator color="#fff" />
-          : <Text style={styles.buttonText}>Log In</Text>
+          : <Text style={styles.buttonText}>Logg In</Text>
         }
       </TouchableOpacity>
 
